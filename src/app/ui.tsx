@@ -13,6 +13,7 @@ import type {Driver,Vehicle} from '@/lib/fleet';
 import {Icon,Logo,type IconName} from './icons';
 import {Schedule,TripInspector,StatusPill,tripStatus,dayKey,amount,initials,tripTime} from './dispatch';
 import {Modal} from './modal';
+import {TripControl} from './trip-control';
 import {DemoContext} from './demo-context';
 import {ReportsPanel} from './directories';
 import {ClientsPanel,TasksPanel} from './customer-ui';
@@ -57,7 +58,7 @@ export function Dashboard({trips,bookings,actor,drivers,vehicles,users,audit,fin
   const allowed=driverOnly?['trips','bookings','finance']:[...navItems.map(n=>n.key),...(actor.role==='owner'?['settings']:[])];
   if(allowed.includes(next))setTab(next);
   const savedDate=q.get('date');if(savedDate===''||savedDate&&/^\d{4}-\d{2}-\d{2}$/.test(savedDate))setDate(savedDate);
-  const trip=q.get('trip');if(trips.some(t=>t.id===trip))setSelectedTripId(trip!);
+  const trip=q.get('trip');if(trips.some(t=>t.id===trip)){setSelectedTripId(trip!);if(q.get('panel')==='trip'){setManagedId(trip!);setModal('trip');}}
   const order=q.get('order');if(bookings.some(b=>b.id===order))setBookingIdFilter(order!);
   const client=q.get('client');if(workspace.clients.some(c=>c.id===client))setClientId(client!);
   setContextReady(true);
@@ -67,10 +68,10 @@ export function Dashboard({trips,bookings,actor,drivers,vehicles,users,audit,fin
  useEffect(()=>{
   if(demo||!contextReady)return;
   const q=new URLSearchParams();q.set('tab',tab);q.set('date',date);
-  if(selectedTripId)q.set('trip',selectedTripId);if(bookingIdFilter)q.set('order',bookingIdFilter);if(clientId)q.set('client',clientId);
+  if(selectedTripId)q.set('trip',selectedTripId);if(bookingIdFilter)q.set('order',bookingIdFilter);if(clientId)q.set('client',clientId);if(modal==='trip'&&managedId)q.set('panel','trip');
   const target=`${window.location.pathname}?${q}`;
   if(`${window.location.pathname}${window.location.search}`!==target)router.replace(target,{scroll:false});
- },[demo,contextReady,tab,date,selectedTripId,bookingIdFilter,clientId,router,newNow]);
+ },[demo,contextReady,tab,date,selectedTripId,bookingIdFilter,clientId,modal,managedId,router,newNow]);
  const roleLabel={owner:'Владелец',dispatcher:'Диспетчер',driver:'Водитель'}[actor.role];
  const title=tab==='trips'&&driverOnly?'Мои рейсы':navItems.find(n=>n.key===tab)?.label??'Настройки';
  const routes=[...new Set(trips.map(t=>`${t.origin} → ${t.destination}`))];
@@ -125,7 +126,7 @@ export function Dashboard({trips,bookings,actor,drivers,vehicles,users,audit,fin
  <footer>{demo?'Демонстрация интерфейса · тестовые данные':'Karven CRM · Время рейсов: Бишкек (UTC+6)'}</footer></main></div>
  {mobileNav&&<button className="nav-scrim" onClick={()=>setMobileNav(false)} aria-label="Закрыть меню"/>}
  {modal==='create'&&<Modal title="Создать рейс" onClose={()=>setModal(null)}><CreateTrip onSaved={(iso,state)=>{if(state.createdId)setSelectedTripId(state.createdId);setDate(dayKey(iso));setRouteFilter('');setStatusFilter('all');setSearch('');setPage(0);setTab('trips');}}/></Modal>}
- {modal==='trip'&&managed&&<Modal title={`${managed.origin} → ${managed.destination}`} onClose={()=>setModal(null)}><article className="trip trip-detail"><div className="trip-detail-header"><h2 className="route">{managed.origin} → {managed.destination}</h2><StatusPill {...tripStatus(managed,bookings,demo?demoStatuses[managed.id]:undefined)}/></div><p className="muted">{new Date(managed.departure_at).toLocaleString('ru',{timeZone:'Asia/Bishkek'})} · Бишкек (UTC+6)</p><button className="button-outline" onClick={()=>{setSelectedTripId(managed.id);setModal(null);setTab('finance');}}>К расчёту рейса</button><div className="seats"><strong>{managed.capacity-managed.occupied}</strong> из {managed.capacity} свободно</div>{!driverOnly&&managed.status==='scheduled'&&new Date(managed.departure_at).getTime()>clock&&managed.occupied<managed.capacity&&<button onClick={()=>quickBook(managed.id)}><Icon name="plus"/>Забронировать</button>}<div className="assignment"><p>{managed.driver_name?`${managed.driver_name} · ${managed.vehicle_model} · ${managed.vehicle_plate}`:'Водитель и автомобиль не назначены'}</p><p className="muted">Плановое окончание: {new Date(managed.ends_at).toLocaleString('ru',{timeZone:'Asia/Bishkek'})}</p>{!driverOnly&&managed.status==='scheduled'&&new Date(managed.departure_at).getTime()>clock&&<details><summary>Назначить или заменить</summary><AssignmentForm trip={managed} drivers={drivers} vehicles={vehicles}/></details>}{!driverOnly&&managed.status==='scheduled'&&<CompletionForm tripId={managed.id}/>} {managed.cancel_reason&&<p className="muted">Причина отмены: {managed.cancel_reason}</p>}{!driverOnly&&managed.status==='scheduled'&&<CancelTripForm trip={managed} bookings={bookings} actor={actor}/>}</div><div className="panel-heading trip-orders-heading"><h2>Заказы рейса</h2></div>{bookings.filter(b=>b.trip_id===managed.id).map(b=><BookingCard key={b.id} booking={b} trips={trips} actor={actor}/>)}</article></Modal>}
+ {modal==='trip'&&managed&&<Modal title={`${managed.origin} → ${managed.destination}`} onClose={()=>setModal(null)}><article className="trip trip-detail"><div className="trip-detail-header"><h2 className="route">{managed.origin} → {managed.destination}</h2><StatusPill {...tripStatus(managed,bookings,demo?demoStatuses[managed.id]:undefined)}/></div><p className="muted">{new Date(managed.departure_at).toLocaleString('ru',{timeZone:'Asia/Bishkek'})} · Бишкек (UTC+6)</p><button className="button-outline" onClick={()=>{setSelectedTripId(managed.id);setModal(null);setTab('finance');}}>К расчёту рейса</button><div className="seats"><strong>{managed.capacity-managed.occupied}</strong> из {managed.capacity} свободно</div>{!driverOnly&&managed.status==='scheduled'&&new Date(managed.departure_at).getTime()>clock&&managed.occupied<managed.capacity&&<button onClick={()=>quickBook(managed.id)}><Icon name="plus"/>Забронировать</button>}<>{!driverOnly&&<TripControl key={managed.id} trip={managed} bookings={bookings} workspace={workspace} drivers={drivers} vehicles={vehicles} actor={actor} now={clock}/>}</><div className="assignment" id={`trip-assignment-${managed.id}`} tabIndex={-1}><p>{managed.driver_name?`${managed.driver_name} · ${managed.vehicle_model} · ${managed.vehicle_plate}`:'Водитель и автомобиль не назначены'}</p><p className="muted">Плановое окончание: {new Date(managed.ends_at).toLocaleString('ru',{timeZone:'Asia/Bishkek'})}</p>{!driverOnly&&managed.status==='scheduled'&&new Date(managed.departure_at).getTime()>clock&&<details><summary>Назначить или заменить</summary><AssignmentForm trip={managed} drivers={drivers} vehicles={vehicles}/></details>}{!driverOnly&&managed.status==='scheduled'&&<CompletionForm tripId={managed.id}/>} {managed.cancel_reason&&<p className="muted">Причина отмены: {managed.cancel_reason}</p>}{!driverOnly&&managed.status==='scheduled'&&<CancelTripForm trip={managed} bookings={bookings} actor={actor}/>}</div><div className="panel-heading trip-orders-heading"><h2>Заказы рейса</h2></div>{bookings.filter(b=>b.trip_id===managed.id).map(b=><div id={`trip-order-${managed.id}-${b.id}`} key={b.id} tabIndex={-1}><BookingCard booking={b} trips={trips} actor={actor}/></div>)}</article></Modal>}
  </div></DemoContext.Provider>;
 }
 function CreateTrip({onSaved}:{onSaved:(iso:string,state:ActionState)=>void}) {
