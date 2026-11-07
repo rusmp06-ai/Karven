@@ -47,7 +47,9 @@ async function settings(db:Database){return (await db.query<Settings>('SELECT en
 export function createTelegram(db:Database,actor:Actor,transport:TelegramTransport=sendTelegram){
  const access=()=>requireRole(actor,'owner');
  return {
-  async view():Promise<TelegramView>{access();const s=await settings(db);const deliveries=(await db.query<TelegramDelivery>('SELECT booking_id,status,attempts,last_error,created_at,sent_at FROM telegram_outbox ORDER BY created_at DESC,booking_id LIMIT 30')).rows.map(d=>({...d,created_at:new Date(d.created_at).toISOString(),sent_at:d.sent_at?new Date(d.sent_at).toISOString():null}));return {enabled:s.enabled,tokenConfigured:!!s.encrypted_token,chatId:s.chat_id,version:s.version,lastTestAt:s.last_test_at?new Date(s.last_test_at).toISOString():null,lastTestError:s.last_test_error,deliveries};},
+  async view():Promise<TelegramView>{
+   access();const [s,result]=await Promise.all([settings(db),db.query<TelegramDelivery>('SELECT booking_id,status,attempts,last_error,created_at,sent_at FROM telegram_outbox ORDER BY created_at DESC,booking_id LIMIT 30')]);
+   const deliveries=result.rows.map(d=>({...d,created_at:new Date(d.created_at).toISOString(),sent_at:d.sent_at?new Date(d.sent_at).toISOString():null}));return {enabled:s.enabled,tokenConfigured:!!s.encrypted_token,chatId:s.chat_id,version:s.version,lastTestAt:s.last_test_at?new Date(s.last_test_at).toISOString():null,lastTestError:s.last_test_error,deliveries};},
   async save(raw:unknown){
    access();const input=z.object({token:z.string().trim().max(150).default('').refine(v=>!v||tokenPattern.test(v),'Проверьте формат токена BotFather'),chatId:z.string().trim().max(21).default('').refine(v=>!v||chatPattern.test(v),'Укажите числовой ID чата, для группы — со знаком минус'),enabled:z.enum(['true','false']),version:z.coerce.number().int().min(1),requestId:z.uuid()}).parse(raw);
    await db.transaction(tx=>once(tx,actor,input.requestId,'telegram.save',input,async()=>{

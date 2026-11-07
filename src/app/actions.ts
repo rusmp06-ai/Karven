@@ -1,4 +1,5 @@
 'use server';
+import {after} from 'next/server';
 import {createTelegram,waitForTelegramDelivery,dispatchTelegram} from '@/lib/telegram';
 import {backupLimit,isServerless} from '@/lib/deployment';
 import {withWorkspace} from '@/lib/workspace-lock';
@@ -77,7 +78,9 @@ async function performMutation(_:ActionState,form:FormData):Promise<ActionState>
    case 'resetPassword':await auth.resetPassword(actor,String(data.id),String(data.password));break;
    default:return {error:'Неизвестная операция'};
   }
-  if(isServerless()&&['booking','telegramRetry'].includes(String(data.action)))await dispatchTelegram(db);
+  if(isServerless()&&['booking','telegramRetry'].includes(String(data.action))){
+   try{after(async()=>{await dispatchTelegram(db)})}catch{console.error('Telegram background scheduling unavailable; notifications remain queued')}
+  }
   if(!restored){revalidatePath('/');return {success:'Сохранено',createdId,entity};}
  } catch(error) {
   if(['backupCreate','backupVerify','backupImport','backupRestore','telegramTest'].includes(String(form.get('action'))))revalidatePath('/');

@@ -5,6 +5,7 @@ import {mkdtemp,rm,readFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import pg from 'pg';
+import {createServer,createConnection,type Socket,type AddressInfo} from 'node:net';
 import {rootCertificates} from 'node:tls';
 import {PostgresDatabase,postgresConfig,migratePostgres,checkPostgres,migrationSql} from '../src/lib/postgres';
 import {schema} from '../src/lib/schema';
@@ -146,3 +147,30 @@ it.skipIf(!enabled)('отложенный обработчик не переис
  });
  expect(await delayed).not.toBe(first);
 });
+
+it.skipIf(!enabled)('конвейер сокращает ожидание сети, сохраняет типы и восстанавливается после ошибки чтения',async()=>{
+ const target=new URL(process.env.KARVEN_PG_TEST_URL!);target.pathname=`/${database}`;
+ const sockets=new Set<Socket>(),timers=new Set<ReturnType<typeof setTimeout>>();
+ const later=(work:()=>void)=>{const timer=setTimeout(()=>{timers.delete(timer);work()},40);timers.add(timer)};
+ const proxy=createServer(client=>{
+  const upstream=createConnection({host:'127.0.0.1',port:55439});sockets.add(client);sockets.add(upstream);
+  client.on('data',data=>later(()=>{if(!upstream.destroyed)upstream.write(data)}));upstream.on('data',data=>later(()=>{if(!client.destroyed)client.write(data)}));
+  client.on('end',()=>later(()=>upstream.end()));upstream.on('end',()=>later(()=>client.end()));
+  client.on('error',()=>upstream.destroy());upstream.on('error',()=>client.destroy());
+  client.on('close',()=>sockets.delete(client));upstream.on('close',()=>sockets.delete(upstream));
+ });
+ await new Promise<void>(resolve=>proxy.listen(0,'127.0.0.1',resolve));target.port=String((proxy.address() as AddressInfo).port);const delayed=new PostgresDatabase(target.toString());
+ try{
+  await delayed.withWorkspace(async()=>{
+   const query=(i:number)=>delayed.query<{value:number;exact:string;at:Date}>("SELECT $1::integer AS value,9007199254740993::bigint AS exact,TIMESTAMPTZ '2026-01-01 00:00:00+00' AS at",[i]);
+   let start=performance.now();const sequential=[];for(let i=0;i<8;i++)sequential.push((await query(i)).rows[0]);const serialMs=performance.now()-start;
+   start=performance.now();const parallel=(await Promise.all(Array.from({length:8},(_,i)=>query(i)))).map(r=>r.rows[0]);const pipelineMs=performance.now()-start;
+   expect(parallel).toEqual(sequential);expect(parallel[0].at).toBeInstanceOf(Date);expect(parallel[0].exact).toBe('9007199254740993');expect(pipelineMs).toBeLessThan(serialMs*0.75);
+   console.info(`Latency simulation (40 ms each direction): sequential ${Math.round(serialMs)} ms, pipeline ${Math.round(pipelineMs)} ms`);
+   const results=await Promise.allSettled([delayed.query('SELECT 1/0'),delayed.query('SELECT 42 AS n')]);expect(results[0].status).toBe('rejected');expect(results[1]).toMatchObject({status:'fulfilled',value:{rows:[{n:42}]}});
+   expect((await delayed.query('SELECT 1 AS n')).rows).toEqual([{n:1}]);
+  });
+ }finally{
+  await delayed.close();for(const timer of timers)clearTimeout(timer);for(const socket of sockets)socket.destroy();await new Promise<void>(resolve=>proxy.close(()=>resolve()));
+ }
+},15000);

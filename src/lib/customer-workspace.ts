@@ -18,11 +18,17 @@ export function createCustomerWorkspace(db:Database,actor:Actor){
  return {
   async list():Promise<CustomerWorkspace>{
    access();
-   const clients=(await db.query<Customer>('SELECT id,name,phone FROM clients ORDER BY name,id')).rows;
-   const notes=(await db.query<CustomerNote>(`SELECT n.id,n.client_id,n.body,u.name AS author_name,n.created_at FROM client_notes n JOIN users u ON u.id=n.author_id ORDER BY n.created_at DESC,n.id`)).rows.map(n=>({...n,created_at:new Date(n.created_at).toISOString()}));
-   const movements=(await db.query<CustomerMovement>(`SELECT m.*,b.client_id,t.currency FROM (SELECT id,booking_id,'payment' AS kind,amount_minor,method,created_at FROM payments UNION ALL SELECT id,booking_id,'refund' AS kind,amount_minor,method,created_at FROM refunds) m JOIN bookings b ON b.id=m.booking_id JOIN trips t ON t.id=b.trip_id ORDER BY m.created_at DESC,m.id`)).rows.map(m=>({...m,created_at:new Date(m.created_at).toISOString()}));
-   const tasks=(await db.query<WorkTask>(`SELECT t.id,t.title,t.description,t.status,t.assignee_id,t.client_id,t.trip_id,t.due_at,t.version,u.name AS assignee_name FROM work_tasks t JOIN users u ON u.id=t.assignee_id ORDER BY t.due_at,t.id`)).rows.map(t=>({...t,due_at:new Date(t.due_at).toISOString()}));
-   const assignees=(await db.query<{id:string;name:string}>("SELECT id,name FROM users WHERE active AND role IN ('owner','dispatcher') ORDER BY name,id")).rows;
+   const [clientResult,noteResult,movementResult,taskResult,assigneeResult]=await Promise.all([
+    db.query<Customer>('SELECT id,name,phone FROM clients ORDER BY name,id'),
+    db.query<CustomerNote>(`SELECT n.id,n.client_id,n.body,u.name AS author_name,n.created_at FROM client_notes n JOIN users u ON u.id=n.author_id ORDER BY n.created_at DESC,n.id`),
+    db.query<CustomerMovement>(`SELECT m.*,b.client_id,t.currency FROM (SELECT id,booking_id,'payment' AS kind,amount_minor,method,created_at FROM payments UNION ALL SELECT id,booking_id,'refund' AS kind,amount_minor,method,created_at FROM refunds) m JOIN bookings b ON b.id=m.booking_id JOIN trips t ON t.id=b.trip_id ORDER BY m.created_at DESC,m.id`),
+    db.query<WorkTask>(`SELECT t.id,t.title,t.description,t.status,t.assignee_id,t.client_id,t.trip_id,t.due_at,t.version,u.name AS assignee_name FROM work_tasks t JOIN users u ON u.id=t.assignee_id ORDER BY t.due_at,t.id`),
+    db.query<{id:string;name:string}>("SELECT id,name FROM users WHERE active AND role IN ('owner','dispatcher') ORDER BY name,id")
+   ]);
+   const clients=clientResult.rows,assignees=assigneeResult.rows;
+   const notes=noteResult.rows.map(n=>({...n,created_at:new Date(n.created_at).toISOString()}));
+   const movements=movementResult.rows.map(n=>({...n,created_at:new Date(n.created_at).toISOString()}));
+   const tasks=taskResult.rows.map(n=>({...n,due_at:new Date(n.due_at).toISOString()}));
    return {clients,notes,movements,tasks,assignees};
   },
   async addNote(raw:unknown){

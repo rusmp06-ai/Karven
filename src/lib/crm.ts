@@ -44,11 +44,14 @@ export function createCrm(db: Database, actor:Actor) {
       if(new Date(endsAt)<=new Date(input.departureAt))throw new BusinessError('Окончание должно быть позже отправления');
       const id = randomUUID();
       return db.transaction(async tx => {
+        let created=false;
         await once(tx,actor,input.requestId,'trip.create',input,async()=>{
+          created=true;
           if (new Date(input.departureAt).getTime() <= Date.now()) throw new BusinessError('Дата отправления должна быть в будущем');
           await tx.query('INSERT INTO trips(id,origin,destination,departure_at,capacity,currency,ends_at,create_request_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [id,input.origin,input.destination,input.departureAt,input.capacity,input.currency,endsAt,input.requestId]);
           await audit(tx,id,'trip.created',input);
         });
+        if(created)return id;
         return (await tx.query<{id:string}>('SELECT id FROM trips WHERE create_request_id=$1',[input.requestId])).rows[0].id;
       });
     },
@@ -61,17 +64,18 @@ export function createCrm(db: Database, actor:Actor) {
       const initialPayment=toMinor(input.initialPayment);
       if(initialPayment>toMinor(input.total))throw new BusinessError('Предоплата превышает стоимость заказа');
       return db.transaction(async tx => {
+        let created=false;
         await once(tx,actor,input.requestId,'booking.create',input,async()=>{
-        const { rows: trips } = await tx.query<{capacity:number; status:string; departure_at:Date}>('SELECT * FROM trips WHERE id=$1 FOR UPDATE', [input.tripId]);
+        created=true;
+        const { rows: trips } = await tx.query<{capacity:number; status:string; departure_at:Date;used:number}>("SELECT t.*,(SELECT COALESCE(SUM(b.seats),0)::integer FROM bookings b WHERE b.trip_id=t.id AND b.status='confirmed') AS used FROM trips t WHERE t.id=$1 FOR UPDATE OF t", [input.tripId]);
         const trip = trips[0];
         if (!trip) throw new BusinessError('Рейс не найден');
         if (trip.status !== 'scheduled' || new Date(trip.departure_at).getTime() <= Date.now()) throw new BusinessError('Бронирование этого рейса закрыто');
-        const { rows } = await tx.query<{used:number}>("SELECT COALESCE(SUM(seats),0)::integer AS used FROM bookings WHERE trip_id=$1 AND status='confirmed'",[input.tripId]);
         const reservedSeats=input.bookingType==='vehicle'?trip.capacity:input.seats;
         if(input.childSeats>input.seats)throw new BusinessError('Детских кресел не может быть больше пассажиров');
         if(input.passengers && input.passengers.length!==input.seats)throw new BusinessError('Укажите данные каждого пассажира');
         if(input.seats>trip.capacity)throw new BusinessError('Число пассажиров превышает вместимость рейса');
-        if (rows[0].used + reservedSeats > trip.capacity) throw new BusinessError('Недостаточно свободных мест');
+        if (trip.used + reservedSeats > trip.capacity) throw new BusinessError('Недостаточно свободных мест');
         const {rows: clients} = await tx.query<{id:string}>('INSERT INTO clients(id,name,phone) VALUES ($1,$2,$3) ON CONFLICT(phone) DO UPDATE SET phone=EXCLUDED.phone RETURNING id',[randomUUID(),input.name,phone]);
         await tx.query('INSERT INTO bookings(id,trip_id,client_id,seats,total_minor,note,booking_type,passenger_count,passengers,contact_name,contact_phone,pickup_address,dropoff_address,luggage,child_seats,source,create_request_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)',[id,input.tripId,clients[0].id,reservedSeats,toMinor(input.total),input.note,input.bookingType,input.seats,JSON.stringify(input.passengers??[{name:input.name,phone}]),input.name,phone,input.pickupAddress,input.dropoffAddress,input.luggage,input.childSeats,input.source,input.requestId]);
         await audit(tx,id,'booking.created',{tripId:input.tripId,seats:reservedSeats,passengerCount:input.seats,bookingType:input.bookingType,totalMinor:toMinor(input.total)});
@@ -81,6 +85,7 @@ export function createCrm(db: Database, actor:Actor) {
         }
         await queueBookingTelegram(tx,id);
         });
+        if(created)return id;
         return (await tx.query<{id:string}>('SELECT id FROM bookings WHERE create_request_id=$1',[input.requestId])).rows[0].id;
       });
     },
@@ -134,10 +139,11 @@ export function createCrm(db: Database, actor:Actor) {
     async dashboard() {
       requireRole(actor,'owner','dispatcher','driver');
       const driverOnly=actor.role==='driver';
-      const {rows: trips} = await db.query<Trip>(`SELECT t.*,d.name AS driver_name,v.plate AS vehicle_plate,v.model AS vehicle_model,COALESCE(SUM(b.seats) FILTER (WHERE b.status='confirmed'),0)::integer AS occupied FROM trips t LEFT JOIN drivers d ON d.id=t.driver_id LEFT JOIN vehicles v ON v.id=t.vehicle_id LEFT JOIN bookings b ON b.trip_id=t.id WHERE ($1::boolean=false OR t.driver_id=$2::uuid) GROUP BY t.id,d.name,v.plate,v.model ORDER BY departure_at`,[driverOnly,actor.driver_id]);
-      const {rows: bookings} = await db.query<Booking>(`SELECT b.id,b.client_id,b.trip_id,b.seats,
+      const tripsRead = db.query<Trip>(`SELECT t.*,d.name AS driver_name,v.plate AS vehicle_plate,v.model AS vehicle_model,COALESCE(SUM(b.seats) FILTER (WHERE b.status='confirmed'),0)::integer AS occupied FROM trips t LEFT JOIN drivers d ON d.id=t.driver_id LEFT JOIN vehicles v ON v.id=t.vehicle_id LEFT JOIN bookings b ON b.trip_id=t.id WHERE ($1::boolean=false OR t.driver_id=$2::uuid) GROUP BY t.id,d.name,v.plate,v.model ORDER BY departure_at`,[driverOnly,actor.driver_id]);
+      const bookingsRead = db.query<Booking>(`SELECT b.id,b.client_id,b.trip_id,b.seats,
       COALESCE((SELECT jsonb_agg(jsonb_build_object('position',a.position,'status',a.status) ORDER BY a.position) FROM passenger_attendance a WHERE a.booking_id=b.id),'[]'::jsonb) AS attendance,
       CASE WHEN $1::boolean THEN '[]'::jsonb ELSE COALESCE((SELECT jsonb_agg(jsonb_build_object('action',h.action,'at',h.created_at,'actor',u.name,'details',h.details) ORDER BY h.created_at DESC) FROM (SELECT * FROM audit_events WHERE entity_id=b.id ORDER BY created_at DESC,id DESC LIMIT 30) h LEFT JOIN users u ON u.id=h.actor_id),'[]'::jsonb) END AS history,b.booking_type,b.passenger_count,b.passengers,b.pickup_address,b.dropoff_address,b.luggage,b.child_seats,CASE WHEN $1::boolean THEN '' ELSE b.source END AS source,t.departure_at,t.status AS trip_status,b.total_minor AS original_total_minor,CASE WHEN b.status='cancelled' THEN 0 ELSE b.total_minor-COALESCE(r.refunded_minor,0)::integer END AS total_minor,COALESCE(r.refunded_minor,0)::integer AS refunded_minor,b.status,CASE WHEN $1::boolean THEN '' ELSE b.note END AS note,b.contact_name AS name,b.contact_phone AS phone,t.currency,t.origin,t.destination,(COALESCE(p.paid_minor,0)-COALESCE(r.refunded_minor,0))::integer AS paid_minor FROM bookings b JOIN clients c ON c.id=b.client_id JOIN trips t ON t.id=b.trip_id LEFT JOIN (SELECT booking_id,SUM(amount_minor) AS paid_minor FROM payments GROUP BY booking_id) p ON p.booking_id=b.id LEFT JOIN (SELECT booking_id,SUM(amount_minor) AS refunded_minor FROM refunds GROUP BY booking_id) r ON r.booking_id=b.id WHERE ($1::boolean=false OR (t.driver_id=$2::uuid AND b.status='confirmed')) ORDER BY b.created_at DESC`,[driverOnly,actor.driver_id]);
+      const [{rows:trips},{rows:bookings}]=await Promise.all([tripsRead,bookingsRead]);
       return {trips,bookings};
     },
   };

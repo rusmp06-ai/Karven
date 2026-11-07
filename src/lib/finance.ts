@@ -121,7 +121,8 @@ export function createFinance(db:Database,actor:Actor) {
   async report():Promise<FinanceReport> {
    requireRole(actor,'owner','dispatcher','driver');
    const driverOnly=actor.role==='driver';
-   const trips=(await db.query<FinanceTrip>(`SELECT t.id,t.origin,t.destination,t.currency,t.status,t.driver_id,d.name AS driver_name,
+   const [tripResult,expenseResult,payoutResult,refundResult]=await Promise.all([
+    db.query<FinanceTrip>(`SELECT t.id,t.origin,t.destination,t.currency,t.status,t.driver_id,d.name AS driver_name,
     COALESCE(b.revenue,0)::float8 AS revenue_minor,COALESCE(p.amount,0)::float8 AS received_minor,COALESCE(r.amount,0)::float8 AS refunded_minor,
     COALESCE(e.amount,0)::float8 AS expenses_minor,COALESCE(e.driver_amount,0)::float8 AS driver_expenses_minor,
     s.fee_minor, s.reimbursement_minor::float8, s.note AS settlement_note, s.approved_at,
@@ -135,10 +136,12 @@ export function createFinance(db:Database,actor:Actor) {
     LEFT JOIN (SELECT trip_id,SUM(amount_minor) AS amount,SUM(amount_minor) FILTER(WHERE paid_by='driver') AS driver_amount,SUM(amount_minor) FILTER(WHERE paid_by='park') AS park_amount FROM trip_expenses WHERE voided_at IS NULL GROUP BY trip_id) e ON e.trip_id=t.id
     LEFT JOIN driver_settlements s ON s.trip_id=t.id
     LEFT JOIN (SELECT trip_id,SUM(amount_minor) AS amount FROM driver_payouts GROUP BY trip_id) o ON o.trip_id=t.id
-    WHERE ($1::boolean=false OR t.driver_id=$2::uuid) ORDER BY t.departure_at DESC`,[driverOnly,actor.driver_id])).rows;
-   const expenses=(await db.query<Expense>(`SELECT e.id,e.trip_id,e.amount_minor,e.category,e.paid_by,e.description,e.voided_at,e.void_reason,e.created_at FROM trip_expenses e JOIN trips t ON t.id=e.trip_id WHERE ($1::boolean=false OR (t.driver_id=$2::uuid AND e.paid_by='driver')) ORDER BY e.created_at DESC`,[driverOnly,actor.driver_id])).rows;
-   const payouts=(await db.query<Payout>(`SELECT p.id,p.trip_id,p.amount_minor,p.method,p.created_at FROM driver_payouts p JOIN trips t ON t.id=p.trip_id WHERE ($1::boolean=false OR t.driver_id=$2::uuid) ORDER BY p.created_at DESC`,[driverOnly,actor.driver_id])).rows;
-   const refunds=driverOnly?[]:(await db.query<Refund>(`SELECT r.id,b.trip_id,r.booking_id,r.amount_minor,r.method,r.reason,r.created_at,b.contact_name AS name FROM refunds r JOIN bookings b ON b.id=r.booking_id JOIN clients c ON c.id=b.client_id ORDER BY r.created_at DESC`)).rows;
+    WHERE ($1::boolean=false OR t.driver_id=$2::uuid) ORDER BY t.departure_at DESC`,[driverOnly,actor.driver_id]),
+    db.query<Expense>(`SELECT e.id,e.trip_id,e.amount_minor,e.category,e.paid_by,e.description,e.voided_at,e.void_reason,e.created_at FROM trip_expenses e JOIN trips t ON t.id=e.trip_id WHERE ($1::boolean=false OR (t.driver_id=$2::uuid AND e.paid_by='driver')) ORDER BY e.created_at DESC`,[driverOnly,actor.driver_id]),
+    db.query<Payout>(`SELECT p.id,p.trip_id,p.amount_minor,p.method,p.created_at FROM driver_payouts p JOIN trips t ON t.id=p.trip_id WHERE ($1::boolean=false OR t.driver_id=$2::uuid) ORDER BY p.created_at DESC`,[driverOnly,actor.driver_id]),
+    driverOnly?Promise.resolve({rows:[] as Refund[]}):db.query<Refund>(`SELECT r.id,b.trip_id,r.booking_id,r.amount_minor,r.method,r.reason,r.created_at,b.contact_name AS name FROM refunds r JOIN bookings b ON b.id=r.booking_id JOIN clients c ON c.id=b.client_id ORDER BY r.created_at DESC`)
+   ]);
+   const trips=tripResult.rows,expenses=expenseResult.rows,payouts=payoutResult.rows,refunds=refundResult.rows;
    return {trips:trips.map(t=>driverOnly?{...t,revenue_minor:null,received_minor:null,refunded_minor:null,expenses_minor:null,cash_minor:null,result_minor:null}:t),expenses,payouts,refunds};
   },
  };

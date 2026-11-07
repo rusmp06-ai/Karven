@@ -27,7 +27,7 @@ export function postgresConfig(connectionString:string):PoolConfig{
  }catch{throw new DatabaseSetupError('Не удалось прочитать сертификат PostgreSQL. Проверьте PGSSLROOTCERT_PEM или файл PGSSLROOTCERT')}
  const supabase=url.hostname.endsWith('.pooler.supabase.com')||url.hostname.endsWith('.supabase.co');
  const trustedCa=ca??(supabase?[...rootCertificates,supabaseRootCa]:undefined);
- return {connectionString:url.toString(),ssl:local?false:{rejectUnauthorized:true,...(trustedCa?{ca:trustedCa}:{})},max:2,allowExitOnIdle:true,connectionTimeoutMillis:10000,idleTimeoutMillis:10000,application_name:'karven-crm'};
+ return {connectionString:url.toString(),ssl:local?false:{rejectUnauthorized:true,...(trustedCa?{ca:trustedCa}:{})},max:2,pipeline:true,allowExitOnIdle:true,connectionTimeoutMillis:10000,idleTimeoutMillis:10000,application_name:'karven-crm'};
 }
 function transactionClient(client:PoolClient):DbTransaction{return {
  async query<T>(sql:string,params?:unknown[]){checkRequestLock();const result=await client.query(sql,params);checkRequestLock();return {rows:result.rows as T[]}},
@@ -76,7 +76,7 @@ export class PostgresDatabase implements Database {
   const client=scope?.client??await this.connect();let broken=false;
   if(scope)scope.inTransaction=true;
   try{
-   await client.query('BEGIN');await client.query('SELECT pg_advisory_xact_lock($1::bigint)',[writeLock]);
+   await client.query(`BEGIN;SELECT pg_advisory_xact_lock(${writeLock}::bigint)`);
    const result=await work(transactionClient(client));checkRequestLock();await client.query('COMMIT');return result;
   }catch(error){try{await client.query('ROLLBACK')}catch{broken=true;if(scope)scope.lost=true}throw error}
   finally{if(scope)scope.inTransaction=false;else await this.release(client,broken||this.ephemeral)}
@@ -85,6 +85,7 @@ export class PostgresDatabase implements Database {
   if(this.requestScope())return work();
   const deadline=Date.now()+8000;
   let acquired:PoolClient|undefined;
+  let waitingForConnections=false;
   // Waiting sessions must not occupy the whole Session pooler while the owner
   // needs a connection. Unsuccessful contenders disconnect before backing off.
   for(;;){
@@ -93,11 +94,13 @@ export class PostgresDatabase implements Database {
     candidate=await this.connect();
     const result=await candidate.query<{locked:boolean}>('SELECT pg_try_advisory_lock($1::bigint) AS locked',[applicationLock]);
     if(result.rows[0].locked){acquired=candidate;break}
+    waitingForConnections=false;
    }catch(error){
     const message=error instanceof Error?error.message:'';
     if(!/EMAXCONNSESSION|max clients reached|too many (?:clients|connections)/i.test(message))throw error;
+    waitingForConnections=true;
    }finally{if(candidate&&candidate!==acquired)await this.release(candidate,true)}
-   if(Date.now()>=deadline)throw new DatabaseSetupError('Сервис занят. Повторите запрос через несколько секунд');
+   if(Date.now()>=deadline)throw new DatabaseSetupError(waitingForConnections?'Достигнут лимит соединений PostgreSQL. Повторите запрос через несколько секунд':'Не удалось дождаться блокировки рабочего запроса. Проверьте оставшиеся сессии предыдущей версии');
    await new Promise(resolve=>setTimeout(resolve,100+Math.floor(Math.random()*150)));
   }
   const client=acquired!;const scope:RequestConnection={active:true,lost:false,client,connectionKey:this.connectionKey,inTransaction:false};const lost=()=>{scope.lost=true};client.on('error',lost);
@@ -129,9 +132,8 @@ export async function migratePostgres(db:PostgresDatabase,schema:string){
  })}finally{await db.releaseApplicationLease()}
 }
 export async function checkPostgres(db:PostgresDatabase){
- const result=await db.query<{schema:string;version:number}>("SELECT current_schema() AS schema,(SELECT max(version)::integer FROM schema_migrations) AS version");
- if(result.rows[0]?.schema!=='karven'||result.rows[0]?.version!==9)throw new DatabaseSetupError('База CRM не подготовлена. Выполните npm run db:migrate');
- await db.query('SELECT id FROM karven_archive.backups LIMIT 0');
+ const result=await db.query<{schema:string;version:number;archives:boolean}>("SELECT current_schema() AS schema,(SELECT max(version)::integer FROM schema_migrations) AS version,to_regclass('karven_archive.backups') IS NOT NULL AS archives");
+ if(result.rows[0]?.schema!=='karven'||result.rows[0]?.version!==9||!result.rows[0]?.archives)throw new DatabaseSetupError('База CRM не подготовлена. Выполните npm run db:migrate');
  return {schema:'karven',version:9};
 }
 

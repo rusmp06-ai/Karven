@@ -22,6 +22,7 @@ export async function verifyPassword(password:string,encoded:string) {
  return expected.length===actual.length && timingSafeEqual(actual,expected);
 }
 export async function bootstrapOwner(db:Database) {
+ if((await db.query('SELECT id FROM users LIMIT 1')).rows.length)return;
  await db.transaction(async tx=>{
  const {rows}=await tx.query('SELECT id FROM users LIMIT 1');
  if(rows.length)return;
@@ -42,12 +43,14 @@ export function createAuth(db:Database) {
    const input=z.object({username:loginName,password:z.string().min(1).max(128)}).parse(raw);
    // Serializing the check and increment prevents parallel requests bypassing the limit.
    return db.transaction(async tx=>{
-    await tx.query("INSERT INTO login_attempts(username) VALUES($1) ON CONFLICT DO NOTHING",[input.username]);
-    const {rows:attempts}=await tx.query<{failures:number;window_start:Date}>('SELECT * FROM login_attempts WHERE username=$1 FOR UPDATE',[input.username]);
+    const [attemptResult,userResult]=await Promise.all([
+     tx.query<{failures:number;window_start:Date}>("INSERT INTO login_attempts(username) VALUES($1) ON CONFLICT(username) DO UPDATE SET username=EXCLUDED.username RETURNING failures,window_start",[input.username]),
+     tx.query<Actor & {password_hash:string;active:boolean}>('SELECT * FROM users WHERE username=$1',[input.username]),
+    ]);
+    const attempts=attemptResult.rows,rows=userResult.rows;
     const expired=Date.now()-new Date(attempts[0].window_start).getTime()>=15*60*1000;
     if(!expired && attempts[0].failures>=5)return null;
     if(expired)await tx.query('UPDATE login_attempts SET failures=0,window_start=now() WHERE username=$1',[input.username]);
-    const {rows}=await tx.query<Actor & {password_hash:string;active:boolean}>('SELECT * FROM users WHERE username=$1',[input.username]);
     // Equal-cost derivation for unknown users avoids a fast username oracle.
     const fallback='scrypt:00000000000000000000000000000000:'+ '00'.repeat(64);
     const valid=await verifyPassword(input.password,rows[0]?.password_hash || fallback);
@@ -55,12 +58,14 @@ export function createAuth(db:Database) {
      await tx.query('UPDATE login_attempts SET failures=failures+1 WHERE username=$1',[input.username]);
      return null;
     }
-    await tx.query('DELETE FROM login_attempts WHERE username=$1',[input.username]);
-    await tx.query('DELETE FROM sessions WHERE expires_at<=now()');
     const token=randomBytes(32).toString('hex');
     const expires=new Date(Date.now()+8*60*60*1000);
-    await tx.query('INSERT INTO sessions(token_hash,user_id,expires_at) VALUES($1,$2,$3)',[hashToken(token),rows[0].id,expires]);
-    await recordAudit(tx,rows[0],rows[0].id,'session.created');
+    await Promise.all([
+     tx.query('DELETE FROM login_attempts WHERE username=$1',[input.username]),
+     tx.query('DELETE FROM sessions WHERE expires_at<=now()'),
+     tx.query('INSERT INTO sessions(token_hash,user_id,expires_at) VALUES($1,$2,$3)',[hashToken(token),rows[0].id,expires]),
+     recordAudit(tx,rows[0],rows[0].id,'session.created'),
+    ]);
     return {token,expires};
    });
   },

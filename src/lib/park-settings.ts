@@ -12,9 +12,10 @@ const price=z.string().default('').transform(v=>v===''?null:toMinor(v));
 export function createParkSettings(db:Database,actor:Actor){return {
  async list():Promise<ParkConfig>{
   requireRole(actor,'owner','dispatcher','driver');
-  const park=(await db.query<ParkSettings>('SELECT name,default_currency,version FROM park_settings WHERE id=$1',[settingsId])).rows[0];
-  const routes=actor.role==='driver'?[]:(await db.query<RouteTemplate>('SELECT id,origin,destination,currency,capacity,duration_minutes,seat_minor,vehicle_minor,active,version FROM route_templates WHERE ($1::boolean OR active) ORDER BY origin,destination,currency,id',[actor.role==='owner'])).rows;
-  return {park,routes};
+  const parkRead=db.query<ParkSettings>('SELECT name,default_currency,version FROM park_settings WHERE id=$1',[settingsId]);
+  const routesRead=actor.role==='driver'?Promise.resolve({rows:[] as RouteTemplate[]}):db.query<RouteTemplate>('SELECT id,origin,destination,currency,capacity,duration_minutes,seat_minor,vehicle_minor,active,version FROM route_templates WHERE ($1::boolean OR active) ORDER BY origin,destination,currency,id',[actor.role==='owner']);
+  const [parkResult,routeResult]=await Promise.all([parkRead,routesRead]);
+  return {park:parkResult.rows[0],routes:routeResult.rows};
  },
  async savePark(raw:unknown){
   requireRole(actor,'owner');const input=z.object({name:z.string().trim().min(1).max(80),defaultCurrency:z.enum(parkCurrencies),version:z.coerce.number().int().min(1),requestId:z.uuid()}).parse(raw);

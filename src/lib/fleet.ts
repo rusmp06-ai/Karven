@@ -12,8 +12,10 @@ export function createFleet(db:Database,actor:Actor) {
  return {
   async list() {
    requireRole(actor,'owner','dispatcher');
-   const drivers=(await db.query<Driver>("SELECT id,name,phone,kind,status,license_number,to_char(license_expires,'YYYY-MM-DD') AS license_expires FROM drivers ORDER BY name")).rows;
-   const vehicles=(await db.query<Vehicle>('SELECT * FROM vehicles ORDER BY plate')).rows;
+   const driversRead=db.query<Driver>("SELECT id,name,phone,kind,status,license_number,to_char(license_expires,'YYYY-MM-DD') AS license_expires FROM drivers ORDER BY name");
+   const vehiclesRead=db.query<Vehicle>('SELECT * FROM vehicles ORDER BY plate');
+   const [driverResult,vehicleResult]=await Promise.all([driversRead,vehiclesRead]);
+   const drivers=driverResult.rows,vehicles=vehicleResult.rows;
    return {drivers,vehicles};
   },
   async saveDriver(raw:unknown) {
