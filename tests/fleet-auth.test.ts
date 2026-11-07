@@ -23,9 +23,11 @@ async function user(role:'dispatcher'|'driver',driverId?:string) {
 }
 beforeEach(async()=>{db=new PGlite();await db.exec(schema);await seedOwner(db);fleet=createFleet(db,owner);auth=createAuth(db);crm=createCrm(db,owner);},30000);
 afterEach(async()=>{await db.close();});
-it('назначает ресурсы и синхронизирует вместимость с машиной',async()=>{
+it('назначает ресурсы и меняет вместимость только после подтверждения',async()=>{
  const r=await resources(),id=await trip(0,10);
- await fleet.assign({...r,tripId:id,endsAt:date(4)});
+ await expect(fleet.assign({...r,tripId:id,endsAt:date(4)})).rejects.toThrow('Подтвердите');
+ expect((await crm.dashboard()).trips[0].capacity).toBe(10);
+ await fleet.assign({...r,tripId:id,endsAt:date(4),capacityConfirmation:`10:${r.vehicleId}:4`});
  expect((await crm.dashboard()).trips[0]).toMatchObject({driver_id:r.driverId,vehicle_id:r.vehicleId,capacity:4,driver_name:'Водитель'});
  const audit=(await db.query<{actor_id:string}>("SELECT actor_id FROM audit_events WHERE action='trip.assigned'")).rows;
  expect(audit[0].actor_id).toBe(owner.id);
@@ -49,7 +51,7 @@ it('проверяет проданные места, затем применя�
  await crm.createBooking({tripId:id,name:'Клиент',phone:'+996555111222',seats:5,total:'500'});
  await expect(fleet.assign({...r,tripId:id,endsAt:date(4)})).rejects.toThrow('меньше мест');
  const booking=(await crm.dashboard()).bookings[0];await crm.cancelBooking(booking.id);
- await fleet.assign({...r,tripId:id,endsAt:date(4)});
+ await fleet.assign({...r,tripId:id,endsAt:date(4),capacityConfirmation:`8:${r.vehicleId}:4`});
  await expect(crm.createBooking({tripId:id,name:'Клиент',phone:'+996555111222',seats:5,total:'500'})).rejects.toThrow('вместимость');
 });
 it('проверяет недоступность, удостоверение и порядок дат',async()=>{
@@ -136,4 +138,15 @@ it('миграция сохраняет данные версии 1 и повт�
   expect(row.origin).toBe('А');expect(new Date(row.ends_at).getTime()).toBe(new Date(date(6)).getTime());
   expect((await legacy.query('SELECT * FROM schema_migrations')).rows).toHaveLength(9);
  } finally {await legacy.close();}
+});
+
+it('отклоняет устаревшее подтверждение вместимости и сохраняет прежний рейс',async()=>{
+ const r=await resources(),id=await trip(0,8);
+ await fleet.saveVehicle({...vehicleData,id:r.vehicleId,capacity:6});
+ await expect(fleet.assign({...r,tripId:id,endsAt:date(4),capacityConfirmation:`8:${r.vehicleId}:4`})).rejects.toThrow('Подтвердите');
+ expect((await crm.dashboard()).trips[0]).toMatchObject({capacity:8,vehicle_id:null});
+ await fleet.assign({...r,tripId:id,endsAt:date(4),capacityConfirmation:`8:${r.vehicleId}:6`});
+ expect((await crm.dashboard()).trips[0].capacity).toBe(6);
+ const event=(await db.query<{details:Record<string,unknown>}>("SELECT details FROM audit_events WHERE action='trip.assigned' AND entity_id=$1",[id])).rows[0];
+ expect(event.details).toMatchObject({beforeCapacity:8,capacity:6,capacityChanged:true});
 });

@@ -1,6 +1,7 @@
 import type { CSSProperties } from 'react';
-export type IconName='home'|'calendar'|'booking'|'users'|'wheel'|'car'|'coins'|'task'|'chart'|'settings'|'search'|'bell'|'user'|'plus'|'arrow'|'chevron'|'phone'|'swap'|'filter'|'list'|'pin'|'wallet'|'card'|'check'|'more'|'close'|'logout'|'external'|'menu'|'clock'|'id';
+export type IconName='home'|'calendar'|'booking'|'users'|'wheel'|'car'|'coins'|'task'|'chart'|'settings'|'search'|'bell'|'user'|'plus'|'arrow'|'chevron'|'phone'|'swap'|'filter'|'list'|'pin'|'wallet'|'card'|'check'|'more'|'close'|'logout'|'external'|'menu'|'clock'|'id'|'refresh';
 const paths:Record<IconName,React.ReactNode>={
+ refresh:<><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6 7a7 7 0 0 1 12-1l2 6M4 12l2 6a7 7 0 0 0 12-1"/></>,
  home:<><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-6v-7h-4v7H4a1 1 0 0 1-1-1Z"/></>,
  calendar:<><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4m10-4v4M3 11h18m-13 4h2m4 0h2m-8 3h2"/></>,
  booking:<><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 3h6v4H9zm0 8h6m-6 4h6m-6 3h4"/></>,

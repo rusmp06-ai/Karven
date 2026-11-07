@@ -28,7 +28,7 @@ it('после смены машины эксклюзивный заказ за�
  await crm.createBooking({...input(),bookingType:'vehicle'});const fleet=createFleet(db,owner);
  const driverId=await fleet.saveDriver({name:'Водитель',phone:'+996555888888',kind:'staff',status:'available',licenseNumber:'AB',licenseExpires:'2099-12-31'});
  const vehicle=(capacity:number,plate:string)=>fleet.saveVehicle({model:'Авто',plate,capacity,ownerName:'Парк',kind:'park',status:'available'});
- const assign=async(capacity:number)=>fleet.assign({tripId,driverId,vehicleId:await vehicle(capacity,`TEST${capacity}`),endsAt:new Date(Date.now()+90000000).toISOString()});
+ const assign=async(capacity:number)=>{const before=(await crm.dashboard()).trips[0].capacity,vehicleId=await vehicle(capacity,`TEST${capacity}`);return fleet.assign({tripId,driverId,vehicleId,endsAt:new Date(Date.now()+90000000).toISOString(),capacityConfirmation:`${before}:${vehicleId}:${capacity}`})};
  await assign(6);expect((await crm.dashboard()).bookings[0].seats).toBe(6);await expect(crm.createBooking(input())).rejects.toThrow('Недостаточно');
  await assign(2);expect((await crm.dashboard()).bookings[0].seats).toBe(2);await expect(assign(1)).rejects.toThrow('пассажиров');
 });

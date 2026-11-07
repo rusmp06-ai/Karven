@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { type Actor, requireRole } from './access';
 import { recordAudit } from './audit';
 import { BusinessError } from './crm';
+import {capacityConfirmation} from './fleet-capacity';
 const name=z.string().trim().min(1).max(120);
 const uuid=z.string().uuid();
 export type Driver={id:string;name:string;phone:string;kind:'staff'|'partner';status:'available'|'unavailable';license_number:string;license_expires:string};
@@ -48,10 +49,10 @@ export function createFleet(db:Database,actor:Actor) {
   },
   async assign(raw:unknown) {
    requireRole(actor,'owner','dispatcher');
-   const input=z.object({tripId:uuid,driverId:uuid,vehicleId:uuid,endsAt:z.iso.datetime({offset:true})}).parse(raw);
+   const input=z.object({tripId:uuid,driverId:uuid,vehicleId:uuid,endsAt:z.iso.datetime({offset:true}),capacityConfirmation:z.string().max(100).default('')}).parse(raw);
    await db.transaction(async tx=>{
     // The database adapter serializes business writes; row locks protect assigned resources.
-    const trip=(await tx.query<{departure_at:Date;status:string;driver_id:string|null;vehicle_id:string|null}>('SELECT * FROM trips WHERE id=$1 FOR UPDATE',[input.tripId])).rows[0];
+    const trip=(await tx.query<{departure_at:Date;status:string;driver_id:string|null;vehicle_id:string|null;capacity:number}>('SELECT * FROM trips WHERE id=$1 FOR UPDATE',[input.tripId])).rows[0];
     if(!trip)throw new BusinessError('Рейс не найден');
     if((trip.driver_id!==input.driverId||trip.vehicle_id!==input.vehicleId)&&(await tx.query("SELECT a.booking_id FROM passenger_attendance a JOIN bookings b ON b.id=a.booking_id WHERE b.trip_id=$1 AND b.status='confirmed' LIMIT 1",[input.tripId])).rows.length)throw new BusinessError('Сначала исправьте отметки пассажиров перед заменой водителя или автомобиля');
     if(trip.driver_id && trip.driver_id!==input.driverId && (await tx.query("SELECT id FROM trip_expenses WHERE trip_id=$1 AND paid_by='driver' AND voided_at IS NULL",[input.tripId])).rows.length)throw new BusinessError('Сначала аннулируйте расходы прежнего водителя перед заменой');
@@ -69,10 +70,11 @@ export function createFleet(db:Database,actor:Actor) {
     if(!exclusive && vehicle.capacity<occupied)throw new BusinessError('В машине меньше мест, чем уже забронировано');
     const conflicts=(await tx.query<{driver_id:string;vehicle_id:string}>("SELECT driver_id,vehicle_id FROM trips WHERE id<>$1 AND status='scheduled' AND departure_at<$3 AND ends_at>$2 AND (driver_id=$4 OR vehicle_id=$5)",[input.tripId,trip.departure_at,input.endsAt,input.driverId,input.vehicleId])).rows;
     if(conflicts.length)throw new BusinessError('Водитель или автомобиль уже назначен на пересекающийся рейс');
+    if(vehicle.capacity!==trip.capacity&&input.capacityConfirmation!==capacityConfirmation(trip.capacity,input.vehicleId,vehicle.capacity))throw new BusinessError(`Вместимость рейса изменится с ${trip.capacity} до ${vehicle.capacity} мест. Подтвердите изменение вместимости`);
     // The vehicle becomes the source of passenger capacity; future bookings use this value.
     if(exclusive)await tx.query('UPDATE bookings SET seats=$2 WHERE id=$1',[exclusive.id,vehicle.capacity]);
     await tx.query('UPDATE trips SET driver_id=$2,vehicle_id=$3,ends_at=$4,capacity=$5 WHERE id=$1',[input.tripId,input.driverId,input.vehicleId,input.endsAt,vehicle.capacity]);
-    await recordAudit(tx,actor,input.tripId,'trip.assigned',{driverId:input.driverId,vehicleId:input.vehicleId,endsAt:input.endsAt,capacity:vehicle.capacity});
+    await recordAudit(tx,actor,input.tripId,'trip.assigned',{driverId:input.driverId,vehicleId:input.vehicleId,endsAt:input.endsAt,beforeCapacity:trip.capacity,capacity:vehicle.capacity,capacityChanged:trip.capacity!==vehicle.capacity});
    });
   },
  };

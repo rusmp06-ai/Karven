@@ -1,16 +1,31 @@
 'use client';
-import { useState } from 'react';
+import { useEffect,useState } from 'react';
+import {capacityConfirmation} from '@/lib/fleet-capacity';
 import type { Driver, Vehicle } from '@/lib/fleet';
 import type { Actor } from '@/lib/access';
 import { Field, SubmitForm } from './forms';
 function localDate(iso:string) {
- const date=new Date(iso);
+ if(!iso)return '';
+ const date=new Date(iso);if(!Number.isFinite(date.getTime()))return '';
  return new Date(date.getTime()-date.getTimezoneOffset()*60000).toISOString().slice(0,16);
 }
-export function AssignmentForm({trip,drivers,vehicles}:{trip:{id:string;driver_id:string|null;vehicle_id:string|null;ends_at:string};drivers:Driver[];vehicles:Vehicle[]}) {
- const [end,setEnd]=useState(trip.ends_at);
- return <SubmitForm action="assign"><input type="hidden" name="tripId" value={trip.id}/><Field label="Водитель"><select name="driverId" defaultValue={trip.driver_id??''} required><option value="" disabled>Выберите водителя</option>{drivers.map(d=><option key={d.id} value={d.id} disabled={d.status!=='available'}>{d.name}{d.status!=='available'?' · недоступен':''}</option>)}</select></Field><Field label="Автомобиль"><select name="vehicleId" defaultValue={trip.vehicle_id??''} required><option value="" disabled>Выберите автомобиль</option>{vehicles.map(v=><option key={v.id} value={v.id} disabled={v.status!=='available'}>{v.plate} · {v.model} · {v.capacity} мест{v.status!=='available'?' · недоступен':''}</option>)}</select></Field><Field label="Плановое окончание (ваш часовой пояс)"><input type="datetime-local" defaultValue={localDate(trip.ends_at)} required onChange={e=>setEnd(e.target.value?new Date(e.target.value).toISOString():'')}/><input type="hidden" name="endsAt" value={end}/></Field><p className="muted">После назначения вместимость рейса равна количеству пассажирских мест машины. Соседние рейсы могут начинаться в момент окончания предыдущего.</p></SubmitForm>;
+export function AssignmentForm({trip,drivers,vehicles}:{trip:{id:string;driver_id:string|null;vehicle_id:string|null;ends_at:string;capacity:number};drivers:Driver[];vehicles:Vehicle[]}) {
+ const [end,setEnd]=useState(trip.ends_at),[driverId,setDriverId]=useState(trip.driver_id??''),[vehicleId,setVehicleId]=useState(trip.vehicle_id??''),[confirmed,setConfirmed]=useState('');
+ useEffect(()=>{setEnd(trip.ends_at)},[trip.id,trip.ends_at]);
+ useEffect(()=>{setDriverId(trip.driver_id??'')},[trip.id,trip.driver_id]);
+ useEffect(()=>{setVehicleId(trip.vehicle_id??'')},[trip.id,trip.vehicle_id]);
+ const vehicle=vehicles.find(v=>v.id===vehicleId),changesCapacity=!!vehicle&&vehicle.capacity!==trip.capacity;
+ const confirmation=vehicle?capacityConfirmation(trip.capacity,vehicle.id,vehicle.capacity):'';
+ return <SubmitForm action="assign" resetOnSuccess={false} disabled={changesCapacity&&confirmed!==confirmation}>
+  <input type="hidden" name="tripId" value={trip.id}/>
+  <Field label="Водитель"><select name="driverId" value={driverId} onChange={e=>setDriverId(e.target.value)} required><option value="" disabled>Выберите водителя</option>{drivers.map(d=><option key={d.id} value={d.id} disabled={d.status!=='available'}>{d.name}{d.status!=='available'?' · недоступен':''}</option>)}</select></Field>
+  <Field label="Автомобиль"><select name="vehicleId" value={vehicleId} onChange={e=>{setVehicleId(e.target.value);setConfirmed('')}} required><option value="" disabled>Выберите автомобиль</option>{vehicles.map(v=><option key={v.id} value={v.id} disabled={v.status!=='available'}>{v.plate} · {v.model} · {v.capacity} мест{v.status!=='available'?' · недоступен':''}</option>)}</select></Field>
+  {changesCapacity&&<div role="status"><p className="amber-text">Выбрана машина на {vehicle!.capacity} мест. Вместимость рейса изменится: {trip.capacity} → {vehicle!.capacity}.</p><label className="check-label"><input type="checkbox" name="capacityConfirmation" value={confirmation} checked={confirmed===confirmation} onChange={e=>setConfirmed(e.target.checked?confirmation:'')}/>Подтверждаю изменение вместимости с {trip.capacity} до {vehicle!.capacity} мест</label></div>}
+  <Field label="Плановое окончание (ваш часовой пояс)"><input type="datetime-local" value={localDate(end)} required onChange={e=>setEnd(e.target.value?new Date(e.target.value).toISOString():'')}/><input type="hidden" name="endsAt" value={end}/></Field>
+  <p className="muted">Сейчас в рейсе {trip.capacity} мест. Назначение машины с другой вместимостью требует подтверждения. Уже забронированные места и пассажиры проверяются перед сохранением.</p>
+ </SubmitForm>;
 }
+
 function DriverForm({driver}:{driver?:Driver}) {
  return <SubmitForm action="driver">{driver&&<input type="hidden" name="id" value={driver.id}/>}<Field label="ФИО"><input name="name" required maxLength={120} defaultValue={driver?.name}/></Field><Field label="Телефон"><input name="phone" type="tel" required defaultValue={driver?.phone}/></Field><Field label="Сотрудничество"><select name="kind" defaultValue={driver?.kind??'staff'}><option value="staff">Штатный</option><option value="partner">Привлечённый</option></select></Field><Field label="Статус"><select name="status" defaultValue={driver?.status??'available'}><option value="available">Доступен</option><option value="unavailable">Недоступен</option></select></Field><Field label="Номер водительского удостоверения"><input name="licenseNumber" required maxLength={120} defaultValue={driver?.license_number}/></Field><Field label="Удостоверение действительно до"><input name="licenseExpires" type="date" required defaultValue={driver?.license_expires}/></Field></SubmitForm>;
 }
