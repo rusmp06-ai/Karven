@@ -13,10 +13,11 @@ import {once} from './idempotency';
 import type {BackupInfo} from './backup-types';
 // Dependency order, used for a complete logical restore with FK checks enabled.
 export const backupTables=['schema_migrations','drivers','vehicles','users','clients','trips','bookings','mutation_receipts','payments','refunds','trip_expenses','driver_settlements','driver_payouts','passenger_attendance','audit_events','client_notes','work_tasks','park_settings','route_templates'] as const;
-const allTables=[...backupTables,'sessions','login_attempts'];
+const integrationTables=['telegram_settings','telegram_outbox'];
+const allTables=[...backupTables,'sessions','login_attempts',...integrationTables];
 const maximumBytes=64*1024*1024;
 const metadataInput=z.object({id:z.uuid(),createdBy:z.uuid(),createdAt:z.iso.datetime(),kind:z.enum(['manual','before_restore','imported']),status:z.enum(['creating','verified','failed']),verifiedAt:z.iso.datetime().nullable(),restoredAt:z.iso.datetime().optional(),sha256:z.string().regex(/^[a-f0-9]{64}$/),bytes:z.number().int().min(0).max(maximumBytes),counts:z.record(z.string(),z.number().int().min(0)),error:z.string().max(256).optional()});
-const payloadInput=z.object({format:z.literal('karven-backup'),formatVersion:z.literal(1),schemaVersion:z.literal(8),createdAt:z.iso.datetime(),layout:z.record(z.string(),z.array(z.string())),tables:z.record(z.string(),z.string())}).strict();
+const payloadInput=z.object({format:z.literal('karven-backup'),formatVersion:z.literal(1),schemaVersion:z.union([z.literal(8),z.literal(9)]),createdAt:z.iso.datetime(),layout:z.record(z.string(),z.array(z.string())),tables:z.record(z.string(),z.string())}).strict();
 type Snapshot=z.infer<typeof payloadInput>;
 const hash=(bytes:Uint8Array|string)=>createHash('sha256').update(bytes).digest('hex');
 export function backupDirectory(){return path.resolve(process.env.CRM_BACKUP_DIR||(process.env.DATABASE_DIR?`${process.env.DATABASE_DIR}-backups`:path.join(process.cwd(),'data','backups')))}
@@ -40,17 +41,20 @@ async function columns(db:Tx|PGlite){
 }
 async function capture(db:Tx|PGlite):Promise<Snapshot>{
  const versions=(await db.query<{version:number}>('SELECT version FROM schema_migrations ORDER BY version')).rows.map(r=>r.version);
- if(JSON.stringify(versions)!==JSON.stringify([1,2,3,4,5,6,7,8]))throw new BusinessError('Версия базы несовместима с резервным копированием');
+ if(JSON.stringify(versions)!==JSON.stringify([1,2,3,4,5,6,7,8,9]))throw new BusinessError('Версия базы несовместима с резервным копированием');
  const layout=await columns(db),tables:Record<string,string>={};
  // Keep PostgreSQL JSON as text, preserving bigint values without JS rounding.
  for(const table of backupTables)tables[table]=(await db.query<{data:string}>(`SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb)::text AS data FROM "${table}" t`)).rows[0].data;
- return {format:'karven-backup',formatVersion:1,schemaVersion:8,createdAt:new Date().toISOString(),layout,tables};
+ return {format:'karven-backup',formatVersion:1,schemaVersion:9,createdAt:new Date().toISOString(),layout,tables};
 }
 async function replace(db:Tx,snapshot:Snapshot){
- if(JSON.stringify(await columns(db))!==JSON.stringify(snapshot.layout))throw new BusinessError('Структура копии несовместима с приложением');
+ const layout=await columns(db);if(snapshot.schemaVersion===8)for(const table of integrationTables)delete layout[table];
+ if(JSON.stringify(layout)!==JSON.stringify(snapshot.layout))throw new BusinessError('Структура копии несовместима с приложением');
  if(JSON.stringify(Object.keys(snapshot.tables).sort())!==JSON.stringify([...backupTables].sort()))throw new BusinessError('В копии отсутствуют необходимые таблицы');
  await db.exec(`TRUNCATE ${allTables.map(t=>`"${t}"`).join(',')}`);
  for(const table of backupTables)await db.query(`INSERT INTO "${table}" SELECT * FROM jsonb_populate_recordset(NULL::"${table}",$1::jsonb)`,[snapshot.tables[table]]);
+ if(snapshot.schemaVersion===8)await db.exec('INSERT INTO schema_migrations(version) VALUES(9)');
+ await db.exec('INSERT INTO telegram_settings(id) VALUES(1)');
 }
 async function checks(db:Tx|PGlite){
  const layout=await columns(db),extra:string[]=[];
@@ -80,7 +84,8 @@ async function verifySnapshot(snapshot:Snapshot){
   await db.transaction(tx=>replace(tx,snapshot));await db.close();db=undefined;
   db=new PGlite(path.join(directory,'postgres'));await checks(db);
   const actual=await capture(db);
-  if(JSON.stringify(actual.tables)!==JSON.stringify(snapshot.tables))throw new BusinessError('Данные после пробного восстановления не совпадают с копией');
+  const expected={...snapshot.tables},restored={...actual.tables};if(snapshot.schemaVersion===8){delete expected.schema_migrations;delete restored.schema_migrations;}
+  if(JSON.stringify(restored)!==JSON.stringify(expected))throw new BusinessError('Данные после пробного восстановления не совпадают с копией');
   const counts:Record<string,number>={};for(const table of backupTables)counts[table]=(await db.query<{n:number}>(`SELECT count(*)::integer AS n FROM "${table}"`)).rows[0].n;
   return counts;
  }finally{try{if(db)await db.close()}finally{await rm(directory,{recursive:true,force:true})}}

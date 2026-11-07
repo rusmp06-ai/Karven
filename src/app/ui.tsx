@@ -13,6 +13,8 @@ import {Icon,Logo,type IconName} from './icons';
 import {Schedule,TripInspector,StatusPill,tripStatus,dayKey,amount,initials,tripTime} from './dispatch';
 import {Modal} from './modal';
 import {TripControl} from './trip-control';
+import {TelegramPanel} from './telegram-ui';
+import type {TelegramView} from '@/lib/telegram-types';
 import {BackupsPanel} from './backups-ui';
 import type {BackupInfo} from '@/lib/backup-types';
 import {ParkSettingsPanel,CreateTrip} from './park-settings-ui';
@@ -26,11 +28,11 @@ import {auditLabels} from './labels';
 
 type Audit={id:string;action:string;entity_id:string;actor_name:string|null;created_at:string};
 export type ReceiptDay={day:string;currency:string;amount:number};
-export type DashboardProps={trips:TripView[];bookings:BookingView[];actor:Actor;drivers:Driver[];vehicles:Vehicle[];users:(Actor&{active:boolean})[];audit:Audit[];finance:FinanceView;backups?:BackupInfo[];configuration?:ParkConfig;workspace?:CustomerWorkspace;receiptDays?:ReceiptDay[];now?:string;demo?:boolean;demoStatuses?:Record<string,string>};
+export type DashboardProps={trips:TripView[];bookings:BookingView[];actor:Actor;drivers:Driver[];vehicles:Vehicle[];users:(Actor&{active:boolean})[];audit:Audit[];finance:FinanceView;telegram?:TelegramView;backups?:BackupInfo[];configuration?:ParkConfig;workspace?:CustomerWorkspace;receiptDays?:ReceiptDay[];now?:string;demo?:boolean;demoStatuses?:Record<string,string>};
 type Tab='overview'|'trips'|'bookings'|'clients'|'drivers'|'vehicles'|'finance'|'tasks'|'reports'|'settings';
 type AlertItem={title:string;detail:string;icon:IconName;tone:string;target:Tab;tripId?:string};
 const navItems:{key:Tab;label:string;icon:IconName}[]=[{key:'overview',label:'Обзор',icon:'home'},{key:'trips',label:'Диспетчерская',icon:'calendar'},{key:'bookings',label:'Бронирования',icon:'booking'},{key:'clients',label:'Клиенты',icon:'users'},{key:'drivers',label:'Водители',icon:'wheel'},{key:'vehicles',label:'Автомобили',icon:'car'},{key:'finance',label:'Финансы',icon:'coins'},{key:'tasks',label:'Задачи',icon:'task'},{key:'reports',label:'Отчёты',icon:'chart'}];
-export function Dashboard({trips,bookings,actor,drivers,vehicles,users,audit,finance,receiptDays=[],workspace=emptyWorkspace,backups=[],configuration=defaultParkConfig,now:newNow,demo=false,demoStatuses={}}:DashboardProps) {
+export function Dashboard({trips,bookings,actor,drivers,vehicles,users,audit,finance,receiptDays=[],workspace=emptyWorkspace,telegram,backups=[],configuration=defaultParkConfig,now:newNow,demo=false,demoStatuses={}}:DashboardProps) {
  const router=useRouter();
  const [clock,setClock]=useState(()=>new Date(newNow??Date.now()).getTime());
  useEffect(()=>{if(demo)return;const id=setInterval(()=>setClock(Date.now()),10000);return()=>clearInterval(id);},[demo]);
@@ -52,7 +54,7 @@ export function Dashboard({trips,bookings,actor,drivers,vehicles,users,audit,fin
  const [page,setPage]=useState(0);
  const [modal,setModal]=useState<'create'|'trip'|null>(null);
  const [managedId,setManagedId]=useState('');
- const [settingsTab,setSettingsTab]=useState<'users'|'audit'|'park'|'backups'>('users');
+ const [settingsTab,setSettingsTab]=useState<'users'|'audit'|'park'|'backups'|'telegram'>('users');
  const driverOnly=actor.role==='driver';
  const [contextReady,setContextReady]=useState(false);
  useEffect(()=>{
@@ -64,6 +66,7 @@ export function Dashboard({trips,bookings,actor,drivers,vehicles,users,audit,fin
   const trip=q.get('trip');if(trips.some(t=>t.id===trip)){setSelectedTripId(trip!);if(q.get('panel')==='trip'){setManagedId(trip!);setModal('trip');}}
   const order=q.get('order');if(bookings.some(b=>b.id===order))setBookingIdFilter(order!);
   const client=q.get('client');if(workspace.clients.some(c=>c.id===client))setClientId(client!);
+  const section=q.get('section');if(actor.role==='owner'&&['users','audit','park','backups','telegram'].includes(section??''))setSettingsTab(section as typeof settingsTab);
   setContextReady(true);
  // Restore once per authenticated workspace; subsequent data refreshes preserve current choices.
  // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -71,10 +74,10 @@ export function Dashboard({trips,bookings,actor,drivers,vehicles,users,audit,fin
  useEffect(()=>{
   if(demo||!contextReady)return;
   const q=new URLSearchParams();q.set('tab',tab);q.set('date',date);
-  if(selectedTripId)q.set('trip',selectedTripId);if(bookingIdFilter)q.set('order',bookingIdFilter);if(clientId)q.set('client',clientId);if(modal==='trip'&&managedId)q.set('panel','trip');
+  if(selectedTripId)q.set('trip',selectedTripId);if(bookingIdFilter)q.set('order',bookingIdFilter);if(clientId)q.set('client',clientId);if(modal==='trip'&&managedId)q.set('panel','trip');if(tab==='settings')q.set('section',settingsTab);
   const target=`${window.location.pathname}?${q}`;
   if(`${window.location.pathname}${window.location.search}`!==target)router.replace(target,{scroll:false});
- },[demo,contextReady,tab,date,selectedTripId,bookingIdFilter,clientId,modal,managedId,router,newNow]);
+ },[demo,contextReady,tab,date,selectedTripId,bookingIdFilter,clientId,modal,managedId,settingsTab,router,newNow]);
  const roleLabel={owner:'Владелец',dispatcher:'Диспетчер',driver:'Водитель'}[actor.role];
  const title=tab==='trips'&&driverOnly?'Мои рейсы':navItems.find(n=>n.key===tab)?.label??'Настройки';
  const routes=[...new Set(trips.map(t=>`${t.origin} → ${t.destination}`))];
@@ -125,7 +128,7 @@ export function Dashboard({trips,bookings,actor,drivers,vehicles,users,audit,fin
  {tab==='finance'&&<FinancePanel data={finance} actor={actor} selectedTripId={selectedTripId} onSelectTrip={setSelectedTripId}/>}
  {tab==='tasks'&&!driverOnly&&<><TasksPanel workspace={workspace} trips={trips} actor={actor} now={clock} clientId={taskClientId} onOpenClient={id=>{navigate('clients');setClientId(id);}} onOpenTrip={openTrip}/><Attention items={alerts} onAction={alertAction} full/></>}
  {tab==='reports'&&!driverOnly&&<ReportsPanel trips={trips} bookings={bookings} finance={finance} movements={workspace.movements} now={clock} onTrip={openTrip} onBooking={openBooking} onFinance={id=>{setSelectedTripId(id);setTab('finance');}}/>}
- {tab==='settings'&&actor.role==='owner'&&<><div className="section-tabs"><button className={settingsTab==='backups'?'active':''} onClick={()=>setSettingsTab('backups')}>Резервные копии</button><button className={settingsTab==='park'?'active':''} onClick={()=>setSettingsTab('park')}>Парк и маршруты</button><button className={settingsTab==='users'?'active':''} onClick={()=>setSettingsTab('users')}>Сотрудники</button><button className={settingsTab==='audit'?'active':''} onClick={()=>setSettingsTab('audit')}>Журнал действий</button></div>{settingsTab==='backups'?<BackupsPanel backups={backups}/>:settingsTab==='park'?<ParkSettingsPanel configuration={configuration}/>:settingsTab==='users'?<UsersPanel users={users} drivers={drivers} actorId={actor.id}/>:<section className="panel"><div className="panel-heading"><h2>Последние 100 операций</h2></div>{audit.map(a=><article className="audit-row" key={a.id}><strong>{auditLabels[a.action]??a.action}</strong><span>{a.actor_name??'Ранее'}</span><time>{new Date(a.created_at).toLocaleString('ru',{timeZone:'Asia/Bishkek'})}</time></article>)}</section>}</>}
+ {tab==='settings'&&actor.role==='owner'&&<><div className="section-tabs"><button className={settingsTab==='telegram'?'active':''} onClick={()=>setSettingsTab('telegram')}>Telegram-бот</button><button className={settingsTab==='backups'?'active':''} onClick={()=>setSettingsTab('backups')}>Резервные копии</button><button className={settingsTab==='park'?'active':''} onClick={()=>setSettingsTab('park')}>Парк и маршруты</button><button className={settingsTab==='users'?'active':''} onClick={()=>setSettingsTab('users')}>Сотрудники</button><button className={settingsTab==='audit'?'active':''} onClick={()=>setSettingsTab('audit')}>Журнал действий</button></div>{settingsTab==='telegram'?<TelegramPanel data={telegram} onBooking={openBooking}/>:settingsTab==='backups'?<BackupsPanel backups={backups}/>:settingsTab==='park'?<ParkSettingsPanel configuration={configuration}/>:settingsTab==='users'?<UsersPanel users={users} drivers={drivers} actorId={actor.id}/>:<section className="panel"><div className="panel-heading"><h2>Последние 100 операций</h2></div>{audit.map(a=><article className="audit-row" key={a.id}><strong>{auditLabels[a.action]??a.action}</strong><span>{a.actor_name??'Ранее'}</span><time>{new Date(a.created_at).toLocaleString('ru',{timeZone:'Asia/Bishkek'})}</time></article>)}</section>}</>}
  <footer>{demo?'Демонстрация интерфейса · тестовые данные':'Karven CRM · Время рейсов: Бишкек (UTC+6)'}</footer></main></div>
  {mobileNav&&<button className="nav-scrim" onClick={()=>setMobileNav(false)} aria-label="Закрыть меню"/>}
  {modal==='create'&&<Modal title="Создать рейс" onClose={()=>setModal(null)}><CreateTrip configuration={configuration} onSaved={(iso,state)=>{if(state.createdId)setSelectedTripId(state.createdId);setDate(dayKey(iso));setRouteFilter('');setStatusFilter('all');setSearch('');setPage(0);setTab('trips');}}/></Modal>}

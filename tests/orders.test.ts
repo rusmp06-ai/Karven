@@ -69,7 +69,7 @@ it('миграция сохраняет старую бронь и не выду
   await legacy.query('INSERT INTO bookings(id,trip_id,client_id,seats,total_minor) VALUES($1,$2,$3,3,50000)',[bid,tid,cid]);
   await legacy.exec(migrationV4);await legacy.exec(schema);
   const b=(await createCrm(legacy,owner).dashboard()).bookings[0];
-  expect(b).toMatchObject({passenger_count:3,seats:3,total_minor:50000,name:'Старый клиент'});expect(b.passengers).toHaveLength(1);expect((await legacy.query('SELECT * FROM schema_migrations')).rows).toHaveLength(8);
+  expect(b).toMatchObject({passenger_count:3,seats:3,total_minor:50000,name:'Старый клиент'});expect(b.passengers).toHaveLength(1);expect((await legacy.query('SELECT * FROM schema_migrations')).rows).toHaveLength(9);
  }finally{await legacy.close();}
 });
 it('создаёт бронь и предоплату атомарно, повтор возвращает прежний заказ',async()=>{

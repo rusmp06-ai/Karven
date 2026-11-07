@@ -182,4 +182,15 @@ IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=8) THEN
 END IF;
 END $$;
 `;
-export const schema = schemaV1 + migrationV2 + migrationV3 + migrationV4 + migrationV5 + migrationV6 + migrationV7 + migrationV8;
+export const migrationV9 = `
+DO $$ BEGIN
+IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=9) THEN
+ CREATE TABLE telegram_settings(id integer PRIMARY KEY CHECK(id=1),enabled boolean NOT NULL DEFAULT false,encrypted_token text,chat_id text NOT NULL DEFAULT '',version integer NOT NULL DEFAULT 1,last_test_at timestamptz,last_test_error text);
+ INSERT INTO telegram_settings(id) VALUES(1);
+ CREATE TABLE telegram_outbox(booking_id uuid PRIMARY KEY REFERENCES bookings(id),settings_version integer NOT NULL,payload jsonb NOT NULL CHECK(jsonb_typeof(payload)='object'),status text NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','sending','sent','failed','unknown','cancelled')),attempts integer NOT NULL DEFAULT 0,last_error text,created_at timestamptz NOT NULL DEFAULT now(),next_attempt_at timestamptz NOT NULL DEFAULT now(),sent_at timestamptz);
+ CREATE INDEX telegram_outbox_pending_idx ON telegram_outbox(status,next_attempt_at);
+ INSERT INTO schema_migrations(version) VALUES(9);
+END IF;
+END $$;
+`;
+export const schema = schemaV1 + migrationV2 + migrationV3 + migrationV4 + migrationV5 + migrationV6 + migrationV7 + migrationV8 + migrationV9;

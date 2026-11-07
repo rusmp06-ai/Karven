@@ -1,3 +1,4 @@
+import {queueBookingTelegram} from './telegram-queue';
 import { randomUUID } from 'node:crypto';
 import { PGlite } from '@electric-sql/pglite';
 import { z } from 'zod';
@@ -78,6 +79,7 @@ export function createCrm(db: PGlite, actor:Actor) {
           await tx.query('INSERT INTO payments(id,booking_id,amount_minor,method) VALUES($1,$2,$3,$4)',[randomUUID(),id,initialPayment,input.initialPaymentMethod]);
           await audit(tx,id,'payment.recorded',{amountMinor:initialPayment,method:input.initialPaymentMethod,initialPayment:true});
         }
+        await queueBookingTelegram(tx,id);
         });
         return (await tx.query<{id:string}>('SELECT id FROM bookings WHERE create_request_id=$1',[input.requestId])).rows[0].id;
       });

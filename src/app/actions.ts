@@ -1,4 +1,5 @@
 'use server';
+import {createTelegram,waitForTelegramDelivery} from '@/lib/telegram';
 import {withWorkspace} from '@/lib/workspace-lock';
 import {createBackups} from '@/lib/backups';
 import {cookies} from 'next/headers';
@@ -16,7 +17,7 @@ import { createFinance } from '@/lib/finance';
 import { createTripOperations } from '@/lib/trip-operations';
 import { createAuth, AuthError } from '@/lib/auth';
 export type ActionState = { error?: string; success?: string; createdId?:string; entity?:'trip'|'booking' };
-export async function mutate(previous:ActionState,form:FormData):Promise<ActionState> {return withWorkspace(()=>performMutation(previous,form));}
+export async function mutate(previous:ActionState,form:FormData):Promise<ActionState> {if(['backupRestore','telegramSave','telegramDisconnect','telegramTest'].includes(String(form.get('action'))))await waitForTelegramDelivery();return withWorkspace(()=>performMutation(previous,form));}
 async function performMutation(_:ActionState,form:FormData):Promise<ActionState> {
  const actor=await requireActor();
  let restored=false;
@@ -30,6 +31,10 @@ async function performMutation(_:ActionState,form:FormData):Promise<ActionState>
   // Optional form values must remain absent, rather than empty UUID strings.
   if(data.driverId==='')delete data.driverId;
   switch(data.action) {
+   case 'telegramSave':await createTelegram(db,actor).save(data);break;
+   case 'telegramDisconnect':await createTelegram(db,actor).disconnect(data);break;
+   case 'telegramTest':await createTelegram(db,actor).test();break;
+   case 'telegramRetry':await createTelegram(db,actor).retry(data);break;
    case 'backupImport':{
     const file=form.get('backupFile');if(!(file instanceof File)||file.size===0||file.size>64*1024*1024)return {error:'Выберите JSON-копию размером до 64 МБ'};
     await createBackups(db,actor).importFile(new Uint8Array(await file.arrayBuffer()),String(data.requestId));break;
@@ -73,7 +78,7 @@ async function performMutation(_:ActionState,form:FormData):Promise<ActionState>
   }
   if(!restored){revalidatePath('/');return {success:'Сохранено',createdId,entity};}
  } catch(error) {
-  if(['backupCreate','backupVerify','backupImport','backupRestore'].includes(String(form.get('action'))))revalidatePath('/');
+  if(['backupCreate','backupVerify','backupImport','backupRestore','telegramTest'].includes(String(form.get('action'))))revalidatePath('/');
   if(error instanceof z.ZodError)return {error:error.issues.map(i=>`${i.path.join('.')}: ${i.message}`).join('; ')};
   if(error instanceof BusinessError||error instanceof AccessError||error instanceof AuthError)return {error:error.message};
   console.error('CRM operation failed',error instanceof Error?error.name:'Unknown error');
