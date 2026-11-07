@@ -2,6 +2,8 @@ import pg from 'pg';
 import {AsyncLocalStorage} from 'node:async_hooks';
 import type {PoolClient,PoolConfig} from 'pg';
 import {readFileSync} from 'node:fs';
+import {rootCertificates} from 'node:tls';
+import {supabaseRootCa} from './supabase-ca.mjs';
 import {X509Certificate} from 'node:crypto';
 import type {Database,DbTransaction} from './database-types';
 const writeLock='746376001',applicationLock='746376002';
@@ -22,7 +24,9 @@ export function postgresConfig(connectionString:string):PoolConfig{
   else if(process.env.PGSSLROOTCERT)ca=readFileSync(process.env.PGSSLROOTCERT,'utf8');
   if(ca)new X509Certificate(ca);
  }catch{throw new DatabaseSetupError('Не удалось прочитать сертификат PostgreSQL. Проверьте PGSSLROOTCERT_PEM или файл PGSSLROOTCERT')}
- return {connectionString:url.toString(),ssl:local?false:{rejectUnauthorized:true,...(ca?{ca}:{})},max:2,allowExitOnIdle:true,connectionTimeoutMillis:10000,idleTimeoutMillis:10000,application_name:'karven-crm'};
+ const supabase=url.hostname.endsWith('.pooler.supabase.com')||url.hostname.endsWith('.supabase.co');
+ const trustedCa=ca??(supabase?[...rootCertificates,supabaseRootCa]:undefined);
+ return {connectionString:url.toString(),ssl:local?false:{rejectUnauthorized:true,...(trustedCa?{ca:trustedCa}:{})},max:2,allowExitOnIdle:true,connectionTimeoutMillis:10000,idleTimeoutMillis:10000,application_name:'karven-crm'};
 }
 function transactionClient(client:PoolClient):DbTransaction{return {
  async query<T>(sql:string,params?:unknown[]){checkRequestLock();const result=await client.query(sql,params);checkRequestLock();return {rows:result.rows as T[]}},

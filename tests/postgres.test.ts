@@ -1,5 +1,6 @@
 import {beforeAll,beforeEach,afterAll,it,expect,vi} from 'vitest';
-import {randomUUID} from 'node:crypto';
+import {randomUUID,X509Certificate} from 'node:crypto';
+import {supabaseRootCa} from '../src/lib/supabase-ca.mjs';
 import {mkdtemp,rm,readFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
@@ -86,5 +87,15 @@ it('принимает CA из переменной Netlify, сохраняет 
   const certificate=rootCertificates[0];vi.stubEnv('PGSSLROOTCERT_PEM',certificate);expect(postgresConfig(url).ssl).toMatchObject({rejectUnauthorized:true,ca:certificate.trim()});
   vi.stubEnv('PGSSLROOTCERT_PEM',certificate.replaceAll('\n','\\n'));expect(postgresConfig(url).ssl).toMatchObject({rejectUnauthorized:true,ca:certificate.trim()});
   vi.stubEnv('PGSSLROOTCERT_PEM','invalid-secret-content');expect(()=>postgresConfig(url)).toThrow('PGSSLROOTCERT_PEM');expect(()=>postgresConfig(url)).not.toThrow('invalid-secret-content');
+ }finally{vi.unstubAllEnvs()}
+});
+
+it('использует проверенный корневой сертификат только для Supabase при отсутствии переопределений',()=>{
+ try{
+  vi.stubEnv('PGSSLROOTCERT_PEM','');vi.stubEnv('PGSSLROOTCERT','');
+  const cert=new X509Certificate(supabaseRootCa);expect(cert.ca).toBe(true);expect(cert.verify(cert.publicKey)).toBe(true);
+  expect(cert.fingerprint256).toBe('80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA');
+  const config=postgresConfig('postgresql://user:password@aws-0-example.pooler.supabase.com:5432/postgres');expect(config.ssl).toMatchObject({rejectUnauthorized:true,ca:expect.arrayContaining([supabaseRootCa])});
+  const unrelated=postgresConfig('postgresql://user:password@other.example:5432/postgres');expect(unrelated.ssl).toEqual({rejectUnauthorized:true});
  }finally{vi.unstubAllEnvs()}
 });
