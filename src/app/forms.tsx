@@ -2,7 +2,7 @@
 import { Children, cloneElement, isValidElement, useActionState, useEffect, useId, useState, type ReactElement } from 'react';
 import { mutate, type ActionState } from './actions';
 import { useDemo } from './demo-context';
-export function SubmitForm({action,children,onSuccess,disabled=false,submitLabel}:{action:string;children:React.ReactNode;onSuccess?:(state:ActionState)=>void;disabled?:boolean;submitLabel?:string}) {
+export function SubmitForm({action,children,onSuccess,disabled=false,submitLabel,pendingLabel}:{action:string;children?:React.ReactNode;onSuccess?:(state:ActionState)=>void;disabled?:boolean;submitLabel?:string;pendingLabel?:string}) {
   const demo=useDemo();
   const [requestId,setRequestId]=useState('');
   useEffect(()=>setRequestId(crypto.randomUUID()),[]);
@@ -11,7 +11,7 @@ export function SubmitForm({action,children,onSuccess,disabled=false,submitLabel
     if(result.success){setRequestId(crypto.randomUUID());onSuccess?.(result);}
     return result;
   },{});
-  return <form action={submit}><input type="hidden" name="action" value={action}/><input type="hidden" name="requestId" value={requestId}/>{children}<div aria-live="polite">{demo&&<p className="muted">Демонстрационный режим: изменения не сохраняются.</p>}{state.error && <p className="error" role="alert">{state.error}</p>}{state.success && <p className="success">{state.success}</p>}</div><button disabled={pending||!requestId||disabled||demo} type="submit">{pending?'Сохранение…': submitLabel??(action==='cancel'?'Отменить бронь':'Сохранить')}</button></form>;
+  return <form action={submit}><input type="hidden" name="action" value={action}/><input type="hidden" name="requestId" value={requestId}/>{children}<div aria-live="polite">{demo&&<p className="muted">Демонстрационный режим: изменения не сохраняются.</p>}{state.error && <p className="error" role="alert">{state.error}</p>}{state.success && <p className="success">{state.success}</p>}</div><button disabled={pending||!requestId||disabled||demo} type="submit">{pending?(pendingLabel??'Сохранение…'): submitLabel??(action==='cancel'?'Отменить бронь':'Сохранить')}</button></form>;
 }
 export function Field({label,children}:{label:string;children:React.ReactNode}) {
   const id=useId();

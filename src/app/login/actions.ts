@@ -1,10 +1,12 @@
 'use server';
+import {withWorkspace} from '@/lib/workspace-lock';
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { createAuth } from '@/lib/auth';
 import { getDb } from '@/lib/db';
 import { sessionCookie } from '@/lib/session';
-export async function login(_: {error?:string}, form:FormData):Promise<{error?:string}> {
+export async function login(previous:{error?:string},form:FormData):Promise<{error?:string}>{return withWorkspace(()=>performLogin(previous,form));}
+async function performLogin(_: {error?:string}, form:FormData):Promise<{error?:string}> {
  let session;
  try {session=await createAuth(await getDb()).login(Object.fromEntries(form));}
  catch {return {error:'Не удалось войти. Проверьте логин и пароль.'};}
@@ -14,7 +16,8 @@ export async function login(_: {error?:string}, form:FormData):Promise<{error?:s
  (await cookies()).set(sessionCookie,session.token,{httpOnly:true,sameSite:'lax',secure,path:'/',expires:session.expires});
  redirect('/');
 }
-export async function logout() {
+export async function logout() {return withWorkspace(performLogout);}
+async function performLogout() {
  const jar=await cookies();
  await createAuth(await getDb()).logout(jar.get(sessionCookie)?.value);
  jar.delete(sessionCookie);
