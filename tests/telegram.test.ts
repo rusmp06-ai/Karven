@@ -42,3 +42,19 @@ it('HTTP-ответы Telegram классифицируются без сохр�
 it('уведомляет о регистрации даже при быстрой отмене, сохраняя первоначальные суммы',async()=>{
  await createTelegram(db,owner).save(config());const id=await createCrm(db,owner).createBooking(booking());const {createFinance}=await import('../src/lib/finance');await createFinance(db,owner).cancelWithRefund({bookingId:id,reason:'Клиент отменил поездку',method:'cash',requestId:randomUUID()});const send=vi.fn<TelegramTransport>().mockResolvedValue({status:'sent'});await deliverNextTelegram(db,send);expect(send.mock.calls[0][2]).toContain('Стоимость: 1500.00 KGS');expect(send.mock.calls[0][2]).toContain('бронь уже отменена');
 });
+
+it('serverless использует постоянный ключ среды без локального файла и сохраняет расшифровку в следующем вызове',async()=>{
+ vi.stubEnv('CRM_DEPLOYMENT','netlify');vi.stubEnv('CRM_TELEGRAM_KEY','ab'.repeat(32));
+ await createTelegram(db,owner).save(config());await expect(readFile(path.join(root,'telegram.key'))).rejects.toMatchObject({code:'ENOENT'});
+ const send=vi.fn<TelegramTransport>().mockResolvedValue({status:'sent'});await createTelegram(db,owner,send).test();expect(send.mock.calls[0][0]).toBe(token);
+});
+it('serverless без постоянного ключа не сохраняет токен и не создаёт локальный секрет',async()=>{
+ vi.stubEnv('CRM_DEPLOYMENT','netlify');vi.stubEnv('CRM_TELEGRAM_KEY','');
+ await expect(createTelegram(db,owner).save(config())).rejects.toThrow('CRM_TELEGRAM_KEY');expect((await createTelegram(db,owner).view()).tokenConfigured).toBe(false);await expect(readFile(path.join(root,'telegram.key'))).rejects.toMatchObject({code:'ENOENT'});
+});
+it('прерванная отправка требует ручного повтора, действующая отправка не сбрасывается',async()=>{
+ await createTelegram(db,owner).save(config());const id=await createCrm(db,owner).createBooking(booking());
+ await db.query("UPDATE telegram_outbox SET status='sending',next_attempt_at=now()+interval '5 minutes' WHERE booking_id=$1",[id]);
+ const send=vi.fn<TelegramTransport>().mockResolvedValue({status:'sent'});expect(await deliverNextTelegram(db,send)).toBe(false);expect((await createTelegram(db,owner).view()).deliveries[0].status).toBe('sending');
+ await db.query("UPDATE telegram_outbox SET next_attempt_at=now()-interval '1 second' WHERE booking_id=$1",[id]);expect(await deliverNextTelegram(db,send)).toBe(false);expect((await createTelegram(db,owner).view()).deliveries[0].status).toBe('unknown');expect(send).not.toHaveBeenCalled();
+});

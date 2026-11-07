@@ -1,0 +1,15 @@
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+[build.environment]
+  NODE_VERSION = "24"
+  CRM_DEPLOYMENT = "netlify"
+
+[functions]
+  node_bundler = "esbuild"
+  external_node_modules = ["@electric-sql/pglite", "pg"]
+  included_files = ["node_modules/@electric-sql/pglite/dist/**"]
+
+[functions."telegram-dispatch"]
+  schedule = "*/5 * * * *"

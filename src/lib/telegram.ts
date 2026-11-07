@@ -2,6 +2,7 @@ import {randomBytes,createCipheriv,createDecipheriv} from 'node:crypto';
 import {mkdir,readFile,open} from 'node:fs/promises';
 import path from 'node:path';
 import * as http from 'node:http';
+import {isServerless} from './deployment';
 import type {Database} from './database-types';
 import {z} from 'zod';
 import {BusinessError} from './crm';
@@ -18,6 +19,9 @@ const singleton='00000000-0000-4000-8000-000000000009';
 type Settings={enabled:boolean;encrypted_token:string|null;chat_id:string;version:number;last_test_at:Date|null;last_test_error:string|null};
 function keyPath(){return process.env.CRM_TELEGRAM_KEY_FILE||path.join(process.env.DATABASE_DIR?`${process.env.DATABASE_DIR}-secrets`:path.join(process.cwd(),'data','secrets'),'telegram.key')}
 async function key(create:boolean){
+ const configured=process.env.CRM_TELEGRAM_KEY;
+ if(configured){if(!/^[a-fA-F0-9]{64}$/.test(configured))throw new BusinessError('CRM_TELEGRAM_KEY должен содержать 64 шестнадцатеричных символа');return Buffer.from(configured,'hex')}
+ if(isServerless())throw new BusinessError('Для Telegram задайте CRM_TELEGRAM_KEY в защищённых переменных сервера');
  const filename=keyPath();
  if(create){await mkdir(path.dirname(filename),{recursive:true,mode:0o700});try{const f=await open(filename,'wx',0o600);try{await f.writeFile(randomBytes(32));await f.sync()}finally{await f.close()}}catch(error){if((error as NodeJS.ErrnoException).code!=='EEXIST')throw error}}
  const result=await readFile(filename);if(result.length!==32)throw new Error('Invalid key');return result;
@@ -60,14 +64,16 @@ export function createTelegram(db:Database,actor:Actor,transport:TelegramTranspo
   async retry(raw:unknown){access();const input=z.object({bookingId:z.uuid(),confirmed:z.literal('yes'),requestId:z.uuid()}).parse(raw);await db.transaction(tx=>once(tx,actor,input.requestId,'telegram.retry',input,async()=>{const s=(await tx.query<Settings>('SELECT * FROM telegram_settings WHERE id=1')).rows[0];if(!s.enabled||!s.encrypted_token)throw new BusinessError('Сначала включите подключение Telegram');const row=(await tx.query<{status:string;settings_version:number}>('SELECT status,settings_version FROM telegram_outbox WHERE booking_id=$1 FOR UPDATE',[input.bookingId])).rows[0];if(!row||!['failed','unknown','cancelled'].includes(row.status))throw new BusinessError('Это уведомление недоступно для повтора');await tx.query("UPDATE telegram_outbox SET status='pending',attempts=0,last_error=NULL,next_attempt_at=now(),settings_version=$2 WHERE booking_id=$1",[input.bookingId,s.version]);await recordAudit(tx,actor,input.bookingId,'telegram.retried');}));},
  };
 }
-export async function deliverNextTelegram(db:Database,transport:TelegramTransport=sendTelegram){
+export async function deliverNextTelegram(db:Database,transport:TelegramTransport=sendTelegram){return withWorkspace(()=>performDelivery(db,transport))}
+async function performDelivery(db:Database,transport:TelegramTransport){
  const job=await withWorkspace(()=>db.transaction(async tx=>{
+  await tx.exec("UPDATE telegram_outbox SET status='unknown',last_error='Обработка прервана без подтверждения. Проверьте чат перед повтором' WHERE status='sending' AND next_attempt_at<now()");
   const s=(await tx.query<Settings>('SELECT * FROM telegram_settings WHERE id=1')).rows[0];if(!s.enabled||!s.encrypted_token)return null;
   await tx.query("UPDATE telegram_outbox SET status='cancelled',last_error='Настройки подключения изменены' WHERE status='pending' AND settings_version<>$1",[s.version]);
   const row=(await tx.query<{booking_id:string;attempts:number}>("SELECT booking_id,attempts FROM telegram_outbox WHERE status='pending' AND next_attempt_at<=now() AND settings_version=$1 ORDER BY created_at,booking_id LIMIT 1 FOR UPDATE",[s.version])).rows[0];if(!row)return null;
   const stored=(await tx.query<{payload:{name:string;phone:string;origin:string;destination:string;departure_at:string;passenger_count:number;booking_type:string;total:number;paid:number;currency:string};status:string}>('SELECT o.payload,b.status FROM telegram_outbox o JOIN bookings b ON b.id=o.booking_id WHERE o.booking_id=$1',[row.booking_id])).rows[0];
   const booking=stored.payload;
-  await tx.query("UPDATE telegram_outbox SET status='sending',attempts=attempts+1,last_error=NULL WHERE booking_id=$1",[row.booking_id]);
+  await tx.query("UPDATE telegram_outbox SET status='sending',attempts=attempts+1,last_error=NULL,next_attempt_at=now()+interval '5 minutes' WHERE booking_id=$1",[row.booking_id]);
   const money=(n:number)=>`${(n/100).toFixed(2)} ${booking.currency}`;
   const text=`Новая бронь клиента\nКлиент: ${booking.name}\nТелефон: +${booking.phone}\nРейс: ${booking.origin} → ${booking.destination}\nОтправление: ${new Date(booking.departure_at).toLocaleString('ru',{timeZone:'Asia/Bishkek'})} (Бишкек)\nПассажиров: ${booking.passenger_count}${booking.booking_type==='vehicle'?' · вся машина':''}\nСтоимость: ${money(booking.total)}\nОплачено: ${money(booking.paid)}\nОстаток: ${money(Math.max(0,booking.total-booking.paid))}\nЗаказ: ${row.booking_id}\nДанные на момент регистрации брони.${stored.status==='cancelled'?'\nНа момент отправки бронь уже отменена.':''}`;
   return {...row,settings:s,text};
@@ -84,7 +90,13 @@ export async function deliverNextTelegram(db:Database,transport:TelegramTranspor
 const worker=globalThis as typeof globalThis&{karvenTelegramWorker?:{db:Database;timer:ReturnType<typeof setInterval>;running:Promise<void>|null}};
 export async function waitForTelegramDelivery(){await worker.karvenTelegramWorker?.running;}
 export function startTelegramWorker(db:Database){
+ if(isServerless())return;
  if(worker.karvenTelegramWorker)return;
  const state={db,timer:undefined as unknown as ReturnType<typeof setInterval>,running:null as Promise<void>|null};worker.karvenTelegramWorker=state;
  state.timer=setInterval(()=>{if(state.running)return;state.running=(async()=>{try{await deliverNextTelegram(db)}catch{/* no secrets or request URLs in logs */}})().finally(()=>{state.running=null})},3000);state.timer.unref();
+}
+
+// Await delivery before the function returns; pending rate-limited jobs remain durable.
+export async function dispatchTelegram(db:Database,maximum=1){
+ for(let i=0;i<maximum;i++){try{if(!await deliverNextTelegram(db))break}catch{break}}
 }

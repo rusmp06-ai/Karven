@@ -1,5 +1,6 @@
 'use server';
-import {createTelegram,waitForTelegramDelivery} from '@/lib/telegram';
+import {createTelegram,waitForTelegramDelivery,dispatchTelegram} from '@/lib/telegram';
+import {backupLimit,isServerless} from '@/lib/deployment';
 import {withWorkspace} from '@/lib/workspace-lock';
 import {createBackups} from '@/lib/backups';
 import {cookies} from 'next/headers';
@@ -36,7 +37,7 @@ async function performMutation(_:ActionState,form:FormData):Promise<ActionState>
    case 'telegramTest':await createTelegram(db,actor).test();break;
    case 'telegramRetry':await createTelegram(db,actor).retry(data);break;
    case 'backupImport':{
-    const file=form.get('backupFile');if(!(file instanceof File)||file.size===0||file.size>64*1024*1024)return {error:'Выберите JSON-копию размером до 64 МБ'};
+    const file=form.get('backupFile');if(!(file instanceof File)||file.size===0||file.size>backupLimit())return {error:`Выберите JSON-копию размером до ${backupLimit()/1024/1024} МБ`};
     await createBackups(db,actor).importFile(new Uint8Array(await file.arrayBuffer()),String(data.requestId));break;
    }
    case 'backupCreate':await createBackups(db,actor).create(String(data.requestId));break;
@@ -76,6 +77,7 @@ async function performMutation(_:ActionState,form:FormData):Promise<ActionState>
    case 'resetPassword':await auth.resetPassword(actor,String(data.id),String(data.password));break;
    default:return {error:'Неизвестная операция'};
   }
+  if(isServerless()&&['booking','telegramRetry'].includes(String(data.action)))await dispatchTelegram(db);
   if(!restored){revalidatePath('/');return {success:'Сохранено',createdId,entity};}
  } catch(error) {
   if(['backupCreate','backupVerify','backupImport','backupRestore','telegramTest'].includes(String(form.get('action'))))revalidatePath('/');
