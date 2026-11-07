@@ -26,5 +26,5 @@ export function getDb(): Promise<Database> {
     await bootstrapOwner(db);
     if(!isServerless())startTelegramWorker(db);
     return db;
-  })();
+  })().catch(error=>{globalDb.karvenDb=undefined;throw error});
 }

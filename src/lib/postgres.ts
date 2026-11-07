@@ -8,9 +8,10 @@ import {X509Certificate} from 'node:crypto';
 import type {Database,DbTransaction} from './database-types';
 const writeLock='746376001',applicationLock='746376002';
 export class DatabaseSetupError extends Error {}
-const lockState=globalThis as typeof globalThis&{karvenPgLockContext?:AsyncLocalStorage<{lost:boolean}>};
-const lockContext=lockState.karvenPgLockContext??=new AsyncLocalStorage<{lost:boolean}>();
-function checkRequestLock(){if(lockContext.getStore()?.lost)throw new DatabaseSetupError('Соединение блокировки запроса прервано. Повторите операцию')}
+type RequestConnection={active:boolean;lost:boolean;client:PoolClient;connectionKey:string;inTransaction:boolean};
+const lockState=globalThis as typeof globalThis&{karvenPgLockContext?:AsyncLocalStorage<RequestConnection>};
+const lockContext=lockState.karvenPgLockContext??=new AsyncLocalStorage<RequestConnection>();
+function checkRequestLock(){const scope=lockContext.getStore();if(scope?.active&&scope.lost)throw new DatabaseSetupError('Соединение блокировки запроса прервано. Повторите операцию')}
 export function postgresConfig(connectionString:string):PoolConfig{
  let url:URL;try{url=new URL(connectionString)}catch{throw new DatabaseSetupError('Проверьте DATABASE_URL: требуется строка PostgreSQL из Connect')}
  if(!['postgres:','postgresql:'].includes(url.protocol)||!url.hostname||!url.username||!url.pathname.slice(1))throw new DatabaseSetupError('DATABASE_URL должен содержать PostgreSQL host, user и database');
@@ -38,38 +39,86 @@ export class PostgresDatabase implements Database {
  private lease:PoolClient|null=null;
  private leaseLost=false;
  private initialized=new WeakSet<PoolClient>();
- private assertLease(){if(this.leaseLost)throw new DatabaseSetupError('Связь с базой прервана. Перезапустите сервер CRM')}
- constructor(connectionString:string){this.pool=new pg.Pool(postgresConfig(connectionString));this.pool.on('error',()=>{console.error('PostgreSQL idle connection error')});this.pool.on('connect',client=>{client.on('error',()=>{if(client===this.lease)this.leaseLost=true})});}
- private async connect(){
-  this.assertLease();checkRequestLock();const client=await this.pool.connect();
-  try{if(!this.initialized.has(client)){await client.query("SET search_path TO karven,pg_catalog;SET TIME ZONE 'UTC';SET statement_timeout='30s'");this.initialized.add(client)}return client}catch(error){client.release(true);throw error}
+ private ephemeral=process.env.CRM_DEPLOYMENT==='netlify'||process.env.NETLIFY==='true';
+ private connectionKey:string;
+ constructor(connectionKey:string){this.connectionKey=connectionKey;this.pool=new pg.Pool(postgresConfig(connectionKey));this.pool.on('error',()=>{console.error('PostgreSQL idle connection error')});this.pool.on('connect',client=>{client.on('error',()=>{if(client===this.lease)this.leaseLost=true})});}
+ private async release(client:PoolClient,destroy:boolean){
+  if(!destroy){client.release();return}
+  try{await client.end()}finally{client.release(true)}
  }
- async query<T=Record<string,unknown>>(sql:string,params?:unknown[]){const client=await this.connect();try{return await transactionClient(client).query<T>(sql,params)}finally{client.release()}}
- async exec(sql:string){const client=await this.connect();try{await transactionClient(client).exec(sql)}finally{client.release()}}
+ private requestScope(){const scope=lockContext.getStore();return scope?.active&&scope.connectionKey===this.connectionKey?scope:undefined}
+ private async connect(){
+  if(this.leaseLost)throw new DatabaseSetupError('Связь с базой прервана. Перезапустите сервер CRM');
+  checkRequestLock();const client=await this.pool.connect();
+  try{
+   if(!this.initialized.has(client)){
+    await client.query("SET search_path TO karven,pg_catalog;SET TIME ZONE 'UTC';SET statement_timeout='30s'"+(this.ephemeral?";SET idle_session_timeout='30s';SET idle_in_transaction_session_timeout='30s'":""));
+    this.initialized.add(client);
+   }
+   return client;
+  }catch(error){await this.release(client,true);throw error}
+ }
+ async query<T=Record<string,unknown>>(sql:string,params?:unknown[]){
+  const scope=this.requestScope();if(scope)return transactionClient(scope.client).query<T>(sql,params);
+  const client=await this.connect();try{return await transactionClient(client).query<T>(sql,params)}finally{await this.release(client,this.ephemeral)}
+ }
+ async exec(sql:string){
+  const scope=this.requestScope();if(scope)return transactionClient(scope.client).exec(sql);
+  const client=await this.connect();try{await transactionClient(client).exec(sql)}finally{await this.release(client,this.ephemeral)}
+ }
+ // A restore safety copy must survive rollback of the business transaction.
+ async independentQuery<T=Record<string,unknown>>(sql:string,params?:unknown[]){
+  if(!this.requestScope()?.inTransaction)return this.query<T>(sql,params);
+  const client=await this.connect();try{return await transactionClient(client).query<T>(sql,params)}finally{await this.release(client,true)}
+ }
  async transaction<T>(work:(tx:DbTransaction)=>Promise<T>):Promise<T>{
-  const client=await this.connect();let broken=false;
-  try{await client.query('BEGIN');await client.query('SELECT pg_advisory_xact_lock($1::bigint)',[writeLock]);const result=await work(transactionClient(client));checkRequestLock();await client.query('COMMIT');return result}
-  catch(error){try{await client.query('ROLLBACK')}catch{broken=true}throw error}
-  finally{client.release(broken)}
+  const scope=this.requestScope();if(scope?.inTransaction)throw new DatabaseSetupError('Вложенная транзакция PostgreSQL не поддерживается');
+  const client=scope?.client??await this.connect();let broken=false;
+  if(scope)scope.inTransaction=true;
+  try{
+   await client.query('BEGIN');await client.query('SELECT pg_advisory_xact_lock($1::bigint)',[writeLock]);
+   const result=await work(transactionClient(client));checkRequestLock();await client.query('COMMIT');return result;
+  }catch(error){try{await client.query('ROLLBACK')}catch{broken=true;if(scope)scope.lost=true}throw error}
+  finally{if(scope)scope.inTransaction=false;else await this.release(client,broken||this.ephemeral)}
  }
  async withWorkspace<T>(work:()=>Promise<T>):Promise<T>{
-  const client=await this.connect();let broken=false,locked=false;const scope={lost:false};const lost=()=>{scope.lost=true};client.on('error',lost);
-  try{
-   await client.query('SELECT pg_advisory_lock($1::bigint)',[applicationLock]);locked=true;
-   return await lockContext.run(scope,async()=>{checkRequestLock();const result=await work();checkRequestLock();return result});
-  }finally{
-   if(locked)try{await client.query('SELECT pg_advisory_unlock($1::bigint)',[applicationLock])}catch{broken=true}
-   client.removeListener('error',lost);client.release(broken||scope.lost);
+  if(this.requestScope())return work();
+  const deadline=Date.now()+8000;
+  let acquired:PoolClient|undefined;
+  // Waiting sessions must not occupy the whole Session pooler while the owner
+  // needs a connection. Unsuccessful contenders disconnect before backing off.
+  for(;;){
+   let candidate:PoolClient|undefined;
+   try{
+    candidate=await this.connect();
+    const result=await candidate.query<{locked:boolean}>('SELECT pg_try_advisory_lock($1::bigint) AS locked',[applicationLock]);
+    if(result.rows[0].locked){acquired=candidate;break}
+   }catch(error){
+    const message=error instanceof Error?error.message:'';
+    if(!/EMAXCONNSESSION|max clients reached|too many (?:clients|connections)/i.test(message))throw error;
+   }finally{if(candidate&&candidate!==acquired)await this.release(candidate,true)}
+   if(Date.now()>=deadline)throw new DatabaseSetupError('Сервис занят. Повторите запрос через несколько секунд');
+   await new Promise(resolve=>setTimeout(resolve,100+Math.floor(Math.random()*150)));
+  }
+  const client=acquired!;const scope:RequestConnection={active:true,lost:false,client,connectionKey:this.connectionKey,inTransaction:false};const lost=()=>{scope.lost=true};client.on('error',lost);
+  try{return await lockContext.run(scope,async()=>{checkRequestLock();const result=await work();checkRequestLock();return result})}
+  finally{
+   scope.active=false;
+   try{await client.query('SELECT pg_advisory_unlock($1::bigint)',[applicationLock])}catch{/* the socket is discarded below */}
+   client.removeListener('error',lost);
+   // Destroy the socket now: Lambda can freeze before an idle JS timer fires.
+   await this.release(client,true);
   }
  }
  async acquireApplicationLease(){
   if(this.lease)return;const client=await this.connect();
   try{const result=await client.query<{locked:boolean}>('SELECT pg_try_advisory_lock($1::bigint) AS locked',[applicationLock]);if(!result.rows[0].locked)throw new DatabaseSetupError('Эта база уже открыта другим сервером CRM. Остановите его перед переключением');this.lease=client}
-  catch(error){client.release();throw error}
+  catch(error){await this.release(client,true);throw error}
  }
- async releaseApplicationLease(){if(this.lease){const client=this.lease;this.lease=null;try{await client.query('SELECT pg_advisory_unlock($1::bigint)',[applicationLock]);client.release()}catch{client.release(true)}}}
+ async releaseApplicationLease(){if(this.lease){const client=this.lease;this.lease=null;try{await client.query('SELECT pg_advisory_unlock($1::bigint)',[applicationLock]);await this.release(client,this.ephemeral)}catch{await this.release(client,true)}}}
  async close(){await this.releaseApplicationLease();await this.pool.end()}
 }
+
 export async function migratePostgres(db:PostgresDatabase,schema:string){
  await db.acquireApplicationLease();
  try{await db.transaction(async tx=>{

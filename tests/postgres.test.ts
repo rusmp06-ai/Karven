@@ -44,7 +44,7 @@ it.skipIf(!enabled)('копии доступны другому экземпля
  const first=createBackups(db,owner),copy=await first.create(randomUUID());
  const other=createBackups(second,owner);expect((await other.list())[0].id).toBe(copy.id);expect(await other.download(copy.id)).toEqual(await first.download(copy.id));
  await crm.addPayment({bookingId,amount:'50',method:'cash',requestId:randomUUID()});
- await other.restore({backupId:copy.id,password:'cloud-owner-password',confirmation:'ВОССТАНОВИТЬ',confirmed:'yes',requestId:randomUUID()});
+ await second.withWorkspace(()=>other.restore({backupId:copy.id,password:'cloud-owner-password',confirmation:'ВОССТАНОВИТЬ',confirmed:'yes',requestId:randomUUID()}));
  expect((await crm.dashboard()).bookings[0].paid_minor).toBe(10000);expect(await first.list()).toHaveLength(2);
  await expect(second.transaction(async tx=>{await tx.exec('SET LOCAL ROLE anon');await tx.query('SELECT * FROM karven_archive.backups')})).rejects.toMatchObject({code:'42501'});
 },40000);
@@ -98,4 +98,51 @@ it('использует проверенный корневой сертифи�
   const config=postgresConfig('postgresql://user:password@aws-0-example.pooler.supabase.com:5432/postgres');expect(config.ssl).toMatchObject({rejectUnauthorized:true,ca:expect.arrayContaining([supabaseRootCa])});
   const unrelated=postgresConfig('postgresql://user:password@other.example:5432/postgres');expect(unrelated.ssl).toEqual({rejectUnauthorized:true});
  }finally{vi.unstubAllEnvs()}
+});
+
+it.skipIf(!enabled)('запрос и транзакции через разные адаптеры используют одно соединение',async()=>{
+ await db.withWorkspace(async()=>{
+  const first=(await db.query<{pid:number}>('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+  expect((await second.query<{pid:number}>('SELECT pg_backend_pid() AS pid')).rows[0].pid).toBe(first);
+  expect(await second.transaction(async tx=>(await tx.query<{pid:number}>('SELECT pg_backend_pid() AS pid')).rows[0].pid)).toBe(first);
+  expect((await db.query<{pid:number}>('SELECT pg_backend_pid() AS pid')).rows[0].pid).toBe(first);
+ });
+});
+it.skipIf(!enabled)('независимая страховочная запись переживает откат закреплённой транзакции',async()=>{
+ const id=randomUUID();
+ await db.withWorkspace(async()=>{
+  await expect(second.transaction(async tx=>{
+   await tx.query('INSERT INTO clients(id,name,phone) VALUES($1,$2,$3)',[randomUUID(),'Откат','996555000033']);
+   await db.independentQuery('INSERT INTO karven_archive.backups(id,metadata,payload) VALUES($1,$2::jsonb,$3)',[id,JSON.stringify({proof:true}),Buffer.from('durable')]);throw new Error('rollback');
+  })).rejects.toThrow('rollback');
+ });
+ expect((await db.query('SELECT * FROM clients')).rows).toHaveLength(0);expect((await db.query('SELECT id FROM karven_archive.backups WHERE id=$1',[id])).rows).toHaveLength(1);
+});
+it.skipIf(!enabled)('20 экземпляров работают при лимите 15 сессий и не оставляют соединений после ответа',async()=>{
+ const role=`karven_limit_${randomUUID().replaceAll('-','')}`;const workers:PostgresDatabase[]=[];let business:PostgresDatabase|undefined;
+ await admin.query(`CREATE ROLE "${role}" LOGIN PASSWORD 'karven-test-only' CONNECTION LIMIT 15 BYPASSRLS`);
+ try{
+  await db.exec(`GRANT USAGE ON SCHEMA karven,karven_archive TO "${role}";GRANT ALL ON ALL TABLES IN SCHEMA karven,karven_archive TO "${role}"`);
+  vi.stubEnv('CRM_DEPLOYMENT','netlify');const url=new URL(process.env.KARVEN_PG_TEST_URL!);url.pathname=`/${database}`;url.username=role;url.password='karven-test-only';
+  business=new PostgresDatabase(url.toString());for(let i=0;i<20;i++)workers.push(new PostgresDatabase(url.toString()));
+  await Promise.all(workers.map((worker,i)=>worker.withWorkspace(async()=>{
+   const a=(await worker.query<{pid:number}>('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+   await business!.transaction(async tx=>{expect((await tx.query<{pid:number}>('SELECT pg_backend_pid() AS pid')).rows[0].pid).toBe(a);await tx.query('INSERT INTO clients(id,name,phone) VALUES($1,$2,$3)',[randomUUID(),`Клиент ${i}`,`99655577${String(i).padStart(3,'0')}`])});
+   await new Promise(r=>setTimeout(r,10));
+  })));
+  await expect(workers[0].withWorkspace(async()=>{await business!.query('SELECT 1');throw new Error('failed request')})).rejects.toThrow('failed request');
+  expect((await db.query('SELECT * FROM clients')).rows).toHaveLength(20);
+  await expect.poll(async()=>(await admin.query<{n:number}>('SELECT count(*)::integer AS n FROM pg_stat_activity WHERE usename=$1',[role])).rows[0].n,{timeout:2000}).toBe(0);
+ }finally{
+  await Promise.all(workers.map(worker=>worker.close()));await business?.close();vi.unstubAllEnvs();await db.exec(`DROP OWNED BY "${role}"`);await admin.query(`DROP ROLE "${role}"`);
+ }
+},30000);
+
+it.skipIf(!enabled)('отложенный обработчик не переиспользует закрытое соединение завершённого запроса',async()=>{
+ let delayed!:Promise<number>,first=0;
+ await db.withWorkspace(async()=>{
+  first=(await db.query<{pid:number}>('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+  delayed=new Promise<number>((resolve,reject)=>{setTimeout(()=>{db.withWorkspace(async()=>(await second.query<{pid:number}>('SELECT pg_backend_pid() AS pid')).rows[0].pid).then(resolve,reject)},20)});
+ });
+ expect(await delayed).not.toBe(first);
 });

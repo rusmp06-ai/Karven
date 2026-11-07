@@ -12,6 +12,6 @@ export async function withWorkspace<T>(work:()=>Promise<T>):Promise<T>{
  try{return await context.run(scope,async()=>{
   if(!process.env.DATABASE_URL)return work();
   const db=state.karvenWorkspaceDatabase??=new PostgresDatabase(process.env.DATABASE_URL);
-  return db.withWorkspace(work);
+  return db.withWorkspace(async()=>{try{return await work()}finally{scope.active=false}});
  })}finally{scope.active=false;release()}
 }

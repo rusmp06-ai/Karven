@@ -98,30 +98,31 @@ export function createBackups(db:Database,actor:Actor,directory?:string){
  const limit=backupLimit();
  const sizeError=()=>new BusinessError(`Размер копии превышает поддерживаемые ${limit/1024/1024} МБ`);
  const access=()=>requireRole(actor,'owner');
+ const archiveQuery=<T=Record<string,unknown>>(sql:string,params?:unknown[])=>db.independentQuery?db.independentQuery<T>(sql,params):db.query<T>(sql,params);
  async function metadata(id:string):Promise<BackupInfo>{
   z.uuid().parse(id);
-  if(cloud){const row=(await db.query<{metadata:unknown}>('SELECT metadata FROM karven_archive.backups WHERE id=$1',[id])).rows[0];if(!row)throw new BusinessError('Резервная копия не найдена или её описание повреждено');const info=metadataInput.parse(row.metadata);if(info.id!==id)throw new BusinessError('Описание копии повреждено');return info}
+  if(cloud){const row=(await archiveQuery<{metadata:unknown}>('SELECT metadata FROM karven_archive.backups WHERE id=$1',[id])).rows[0];if(!row)throw new BusinessError('Резервная копия не найдена или её описание повреждено');const info=metadataInput.parse(row.metadata);if(info.id!==id)throw new BusinessError('Описание копии повреждено');return info}
   const dir=location(root,id);
   try{const value=metadataInput.parse(JSON.parse(await readFile(path.join(dir,'metadata.json'),'utf8')));if(value.id!==id)throw new Error();return value}catch{throw new BusinessError('Резервная копия не найдена или её описание повреждено')}
  }
- async function saveMeta(info:BackupInfo){if(cloud){await db.query('UPDATE karven_archive.backups SET metadata=$2::jsonb WHERE id=$1',[info.id,JSON.stringify(info)]);return}await atomicFile(path.join(location(root,info.id),'metadata.json'),JSON.stringify(info))}
+ async function saveMeta(info:BackupInfo){if(cloud){await archiveQuery('UPDATE karven_archive.backups SET metadata=$2::jsonb WHERE id=$1',[info.id,JSON.stringify(info)]);return}await atomicFile(path.join(location(root,info.id),'metadata.json'),JSON.stringify(info))}
  async function load(id:string){
   const info=await metadata(id),filename=path.join(location(root,id),'snapshot.json');
   const file=cloud?{size:info.bytes}:await stat(filename);if(file.size>limit||file.size!==info.bytes)throw new BusinessError('Размер резервной копии не совпадает с описанием');
-  const bytes=cloud?(await db.query<{payload:Buffer}>('SELECT payload FROM karven_archive.backups WHERE id=$1',[id])).rows[0]?.payload:await readFile(filename);if(!bytes||bytes.length!==info.bytes||hash(bytes)!==info.sha256)throw new BusinessError('Контрольная сумма не совпала. Копия повреждена');
+  const bytes=cloud?(await archiveQuery<{payload:Buffer}>('SELECT payload FROM karven_archive.backups WHERE id=$1',[id])).rows[0]?.payload:await readFile(filename);if(!bytes||bytes.length!==info.bytes||hash(bytes)!==info.sha256)throw new BusinessError('Контрольная сумма не совпала. Копия повреждена');
   return {info,bytes,snapshot:payloadInput.parse(JSON.parse(bytes.toString('utf8')))};
  }
  async function persist(snapshot:Snapshot,id:string,kind:BackupInfo['kind']):Promise<BackupInfo>{
   const bytes=Buffer.from(JSON.stringify(snapshot));if(bytes.length>limit)throw sizeError();
   if(!cloud){await mkdir(root,{recursive:true,mode:0o700});await syncDirectory(path.dirname(root));await mkdir(location(root,id),{mode:0o700});await syncDirectory(root)}
   const info:BackupInfo={id,createdBy:actor.id,createdAt:snapshot.createdAt,kind,status:'creating',verifiedAt:null,sha256:hash(bytes),bytes:bytes.length,counts:{}};
-  if(cloud)await db.query('INSERT INTO karven_archive.backups(id,metadata,payload) VALUES($1,$2::jsonb,$3)',[id,JSON.stringify(info),bytes]);else await saveMeta(info);
+  if(cloud)await archiveQuery('INSERT INTO karven_archive.backups(id,metadata,payload) VALUES($1,$2::jsonb,$3)',[id,JSON.stringify(info),bytes]);else await saveMeta(info);
   try{if(!cloud)await atomicFile(path.join(location(root,id),'snapshot.json'),bytes);info.counts=await verifySnapshot(snapshot);info.status='verified';info.verifiedAt=new Date().toISOString();await saveMeta(info);return info}
   catch{info.status='failed';info.error='Не удалось проверить восстановление этой копии';await saveMeta(info);throw new BusinessError(info.error)}
  }
  return {
   async list():Promise<BackupInfo[]>{
-   access();if(cloud){const rows=(await db.query<{metadata:unknown}>('SELECT metadata FROM karven_archive.backups ORDER BY metadata->>\'createdAt\' DESC,id DESC')).rows;return rows.map(row=>metadataInput.parse(row.metadata))}let entries;try{entries=await readdir(root,{withFileTypes:true})}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return [];throw error}
+   access();if(cloud){const rows=(await archiveQuery<{metadata:unknown}>('SELECT metadata FROM karven_archive.backups ORDER BY metadata->>\'createdAt\' DESC,id DESC')).rows;return rows.map(row=>metadataInput.parse(row.metadata))}let entries;try{entries=await readdir(root,{withFileTypes:true})}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return [];throw error}
    const rows:BackupInfo[]=[];for(const entry of entries){if(!entry.isDirectory()||!z.uuid().safeParse(entry.name).success)continue;try{rows.push(await metadata(entry.name))}catch{rows.push({id:entry.name,createdBy:'',createdAt:'',kind:'manual',status:'failed',verifiedAt:null,sha256:'',bytes:0,counts:{},error:'Описание копии повреждено'})}}
    return rows.sort((a,b)=>b.createdAt.localeCompare(a.createdAt)||a.id.localeCompare(b.id));
   },
