@@ -69,6 +69,25 @@ it('миграция сохраняет старую бронь и не выду
   await legacy.query('INSERT INTO bookings(id,trip_id,client_id,seats,total_minor) VALUES($1,$2,$3,3,50000)',[bid,tid,cid]);
   await legacy.exec(migrationV4);await legacy.exec(schema);
   const b=(await createCrm(legacy,owner).dashboard()).bookings[0];
-  expect(b).toMatchObject({passenger_count:3,seats:3,total_minor:50000,name:'Старый клиент'});expect(b.passengers).toHaveLength(1);expect((await legacy.query('SELECT * FROM schema_migrations')).rows).toHaveLength(5);
+  expect(b).toMatchObject({passenger_count:3,seats:3,total_minor:50000,name:'Старый клиент'});expect(b.passengers).toHaveLength(1);expect((await legacy.query('SELECT * FROM schema_migrations')).rows).toHaveLength(6);
  }finally{await legacy.close();}
+});
+it('создаёт бронь и предоплату атомарно, повтор возвращает прежний заказ',async()=>{
+ const requestId=randomUUID(),raw={...input(),requestId,initialPayment:'500',initialPaymentMethod:'transfer'};
+ const id=await crm.createBooking(raw);expect(await crm.createBooking(raw)).toBe(id);
+ const data=await crm.dashboard();expect(data.bookings).toHaveLength(1);expect(data.bookings[0]).toMatchObject({id,total_minor:200000,paid_minor:50000});expect(data.trips[0].occupied).toBe(2);
+ expect((await db.query('SELECT * FROM payments')).rows).toHaveLength(1);
+ await expect(crm.createBooking({...raw,initialPayment:'600'})).rejects.toThrow();
+ await db.query("UPDATE trips SET departure_at=now()-interval '1 hour' WHERE id=$1",[tripId]);
+ expect(await crm.createBooking(raw)).toBe(id);
+});
+it('отклоняет лишнюю предоплату без клиента, брони и оплаты',async()=>{
+ await expect(crm.createBooking({...input(),initialPayment:'2000.01'})).rejects.toThrow('Предоплата');
+ for(const table of ['clients','bookings','payments'])expect((await db.query(`SELECT * FROM ${table}`)).rows).toHaveLength(0);
+});
+it('повтор создания рейса возвращает тот же рейс даже после отправления',async()=>{
+ const raw={origin:'Талас',destination:'Ош',departureAt:new Date(Date.now()+86400000).toISOString(),capacity:4,currency:'KGS',requestId:randomUUID()};
+ const id=await crm.createTrip(raw);expect(await crm.createTrip(raw)).toBe(id);
+ await db.query("UPDATE trips SET departure_at=now()-interval '1 hour' WHERE id=$1",[id]);expect(await crm.createTrip(raw)).toBe(id);
+ await expect(crm.createTrip({...raw,capacity:5})).rejects.toThrow();
 });

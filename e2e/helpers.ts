@@ -6,6 +6,6 @@ export async function createTrip(page:Page,{origin,destination,day=3,capacity=4}
 }
 export async function dispatch(page:Page){await page.getByRole('button',{name:'Диспетчерская',exact:true}).click();}
 export function tripRows(page:Page,origin:string){return page.locator('.schedule-row').filter({has:page.locator('.route',{hasText:origin})});}
-export async function selectTrip(page:Page,origin:string,index=0){const row=tripRows(page,origin).nth(index);await row.click();await expect(row).toHaveAttribute('aria-selected','true');}
+export async function selectTrip(page:Page,origin:string,index=0){await page.getByRole('textbox',{name:'Поиск',exact:true}).fill(origin);const row=tripRows(page,origin).nth(index);await row.click();await expect(row).toHaveAttribute('aria-selected','true');}
 export async function openTrip(page:Page,origin:string,index=0){await dispatch(page);await selectTrip(page,origin,index);await page.getByRole('button',{name:'Открыть рейс',exact:true}).click();return page.getByRole('dialog').locator('article.trip').first();}
 export async function closeModal(page:Page){await page.getByRole('dialog').getByRole('button',{name:'Закрыть окно'}).click();}

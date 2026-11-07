@@ -9,7 +9,7 @@ import { createFleet } from '@/lib/fleet';
 import { createFinance } from '@/lib/finance';
 import { createTripOperations } from '@/lib/trip-operations';
 import { createAuth, AuthError } from '@/lib/auth';
-export type ActionState = { error?: string; success?: string };
+export type ActionState = { error?: string; success?: string; createdId?:string; entity?:'trip'|'booking' };
 export async function mutate(_:ActionState,form:FormData):Promise<ActionState> {
  const actor=await requireActor();
  try {
@@ -17,6 +17,8 @@ export async function mutate(_:ActionState,form:FormData):Promise<ActionState> {
   const crm=createCrm(db,actor),fleet=createFleet(db,actor),auth=createAuth(db);
   const finance=createFinance(db,actor),operations=createTripOperations(db,actor);
   const data=Object.fromEntries(form);
+  let createdId:string|undefined;
+  let entity:ActionState['entity'];
   // Optional form values must remain absent, rather than empty UUID strings.
   if(data.driverId==='')delete data.driverId;
   switch(data.action) {
@@ -33,10 +35,10 @@ export async function mutate(_:ActionState,form:FormData):Promise<ActionState> {
    case 'voidExpense':await finance.voidExpense(data);break;
    case 'approveSettlement':await finance.approveSettlement(data);break;
    case 'payout':await finance.payDriver(data);break;
-   case 'trip':await crm.createTrip(data);break;
+   case 'trip':createdId=await crm.createTrip(data);entity='trip';break;
    case 'booking':
     if(typeof data.passengers==='string'){try{data.passengers=JSON.parse(data.passengers);}catch{return {error:'Проверьте список пассажиров'};}}
-    await crm.createBooking(data);break;
+    createdId=await crm.createBooking(data);entity='booking';break;
    case 'bookingDetails':
     if(typeof data.passengers==='string'){try{data.passengers=JSON.parse(data.passengers);}catch{return {error:'Проверьте список пассажиров'};}}
     await crm.updateBookingDetails(data);break;
@@ -51,7 +53,7 @@ export async function mutate(_:ActionState,form:FormData):Promise<ActionState> {
    default:return {error:'Неизвестная операция'};
   }
   revalidatePath('/');
-  return {success:'Сохранено'};
+  return {success:'Сохранено',createdId,entity};
  } catch(error) {
   if(error instanceof z.ZodError)return {error:error.issues.map(i=>`${i.path.join('.')}: ${i.message}`).join('; ')};
   if(error instanceof BusinessError||error instanceof AccessError||error instanceof AuthError)return {error:error.message};

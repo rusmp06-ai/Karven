@@ -19,11 +19,14 @@ export const tripInput = z.object({
   origin: text, destination: text, departureAt: z.iso.datetime({ offset: true }),
   capacity: z.coerce.number().int().min(1).max(60), currency: z.string().regex(/^[A-Z]{3}$/),
   endsAt: z.iso.datetime({ offset: true }).optional(),
+  requestId: uuid.default(()=>randomUUID()),
 });
 export const bookingInput = detailsInput.extend({
   tripId: uuid, seats: z.coerce.number().int().min(1).max(60), total: money,
   bookingType:z.enum(['seats','vehicle']).default('seats'),
   note: z.string().trim().max(1000).default(''),
+  initialPayment:money.default('0'),initialPaymentMethod:z.enum(['cash','transfer','card']).default('cash'),
+  requestId:uuid.default(()=>randomUUID()),
 });
 export const paymentInput = z.object({ bookingId: uuid, amount: money, method: z.enum(['cash', 'transfer', 'card']), requestId: z.string().uuid().default(()=>randomUUID()) });
 
@@ -36,15 +39,17 @@ export function createCrm(db: PGlite, actor:Actor) {
       requireRole(actor,'owner','dispatcher');
       const input = tripInput.parse(raw);
       if (input.origin.toLowerCase() === input.destination.toLowerCase()) throw new BusinessError('Пункты отправления и назначения должны отличаться');
-      if (new Date(input.departureAt).getTime() <= Date.now()) throw new BusinessError('Дата отправления должна быть в будущем');
       const endsAt = input.endsAt ?? new Date(new Date(input.departureAt).getTime()+6*3600000).toISOString();
       if(new Date(endsAt)<=new Date(input.departureAt))throw new BusinessError('Окончание должно быть позже отправления');
       const id = randomUUID();
-      await db.transaction(async tx => {
-        await tx.query('INSERT INTO trips(id,origin,destination,departure_at,capacity,currency,ends_at) VALUES ($1,$2,$3,$4,$5,$6,$7)', [id,input.origin,input.destination,input.departureAt,input.capacity,input.currency,endsAt]);
-        await audit(tx,id,'trip.created',input);
+      return db.transaction(async tx => {
+        await once(tx,actor,input.requestId,'trip.create',input,async()=>{
+          if (new Date(input.departureAt).getTime() <= Date.now()) throw new BusinessError('Дата отправления должна быть в будущем');
+          await tx.query('INSERT INTO trips(id,origin,destination,departure_at,capacity,currency,ends_at,create_request_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [id,input.origin,input.destination,input.departureAt,input.capacity,input.currency,endsAt,input.requestId]);
+          await audit(tx,id,'trip.created',input);
+        });
+        return (await tx.query<{id:string}>('SELECT id FROM trips WHERE create_request_id=$1',[input.requestId])).rows[0].id;
       });
-      return id;
     },
     async createBooking(raw: unknown) {
       requireRole(actor,'owner','dispatcher');
@@ -52,7 +57,10 @@ export function createCrm(db: PGlite, actor:Actor) {
       const phone = input.phone;
       if (phone.length < 7 || phone.length > 15) throw new BusinessError('Проверьте номер телефона');
       const id = randomUUID();
-      await db.transaction(async tx => {
+      const initialPayment=toMinor(input.initialPayment);
+      if(initialPayment>toMinor(input.total))throw new BusinessError('Предоплата превышает стоимость заказа');
+      return db.transaction(async tx => {
+        await once(tx,actor,input.requestId,'booking.create',input,async()=>{
         const { rows: trips } = await tx.query<{capacity:number; status:string; departure_at:Date}>('SELECT * FROM trips WHERE id=$1 FOR UPDATE', [input.tripId]);
         const trip = trips[0];
         if (!trip) throw new BusinessError('Рейс не найден');
@@ -64,10 +72,15 @@ export function createCrm(db: PGlite, actor:Actor) {
         if(input.seats>trip.capacity)throw new BusinessError('Число пассажиров превышает вместимость рейса');
         if (rows[0].used + reservedSeats > trip.capacity) throw new BusinessError('Недостаточно свободных мест');
         const {rows: clients} = await tx.query<{id:string}>('INSERT INTO clients(id,name,phone) VALUES ($1,$2,$3) ON CONFLICT(phone) DO UPDATE SET phone=EXCLUDED.phone RETURNING id',[randomUUID(),input.name,phone]);
-        await tx.query('INSERT INTO bookings(id,trip_id,client_id,seats,total_minor,note,booking_type,passenger_count,passengers,contact_name,contact_phone,pickup_address,dropoff_address,luggage,child_seats,source) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)',[id,input.tripId,clients[0].id,reservedSeats,toMinor(input.total),input.note,input.bookingType,input.seats,JSON.stringify(input.passengers??[{name:input.name,phone}]),input.name,phone,input.pickupAddress,input.dropoffAddress,input.luggage,input.childSeats,input.source]);
+        await tx.query('INSERT INTO bookings(id,trip_id,client_id,seats,total_minor,note,booking_type,passenger_count,passengers,contact_name,contact_phone,pickup_address,dropoff_address,luggage,child_seats,source,create_request_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)',[id,input.tripId,clients[0].id,reservedSeats,toMinor(input.total),input.note,input.bookingType,input.seats,JSON.stringify(input.passengers??[{name:input.name,phone}]),input.name,phone,input.pickupAddress,input.dropoffAddress,input.luggage,input.childSeats,input.source,input.requestId]);
         await audit(tx,id,'booking.created',{tripId:input.tripId,seats:reservedSeats,passengerCount:input.seats,bookingType:input.bookingType,totalMinor:toMinor(input.total)});
+        if(initialPayment>0){
+          await tx.query('INSERT INTO payments(id,booking_id,amount_minor,method) VALUES($1,$2,$3,$4)',[randomUUID(),id,initialPayment,input.initialPaymentMethod]);
+          await audit(tx,id,'payment.recorded',{amountMinor:initialPayment,method:input.initialPaymentMethod,initialPayment:true});
+        }
+        });
+        return (await tx.query<{id:string}>('SELECT id FROM bookings WHERE create_request_id=$1',[input.requestId])).rows[0].id;
       });
-      return id;
     },
     async updateBookingDetails(raw:unknown) {
       requireRole(actor,'owner','dispatcher');

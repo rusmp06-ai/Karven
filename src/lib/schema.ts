@@ -151,4 +151,13 @@ IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=5) THEN
 END IF;
 END $$;
 `;
-export const schema = schemaV1 + migrationV2 + migrationV3 + migrationV4 + migrationV5;
+export const migrationV6 = `
+DO $$ BEGIN
+IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=6) THEN
+ ALTER TABLE trips ADD COLUMN create_request_id uuid UNIQUE;
+ ALTER TABLE bookings ADD COLUMN create_request_id uuid UNIQUE;
+ INSERT INTO schema_migrations(version) VALUES(6);
+END IF;
+END $$;
+`;
+export const schema = schemaV1 + migrationV2 + migrationV3 + migrationV4 + migrationV5 + migrationV6;
