@@ -1,10 +1,11 @@
 import { test, expect, type Page, type Locator } from '@playwright/test';
+import {openTrip,closeModal} from './helpers';
 async function save(form:Locator) {
  await form.getByRole('button',{name:'Сохранить',exact:true}).click();
  await expect(form.getByRole('button',{name:'Сохранить',exact:true})).toBeEnabled();await expect(form.getByText('Сохранено',{exact:true})).toBeVisible();
 }
 async function financeTrip(page:Page) {
- await page.getByRole('button',{name:'₽ Расходы и расчёты',exact:true}).click();
+ await page.getByRole('button',{name:'Финансы',exact:true}).click();
  await page.getByLabel('Рейс для расчёта').selectOption({label:'Ош → Баткен · KGS · eeeeeeee'});
 }
 function metric(page:Page,label:string) {return page.locator('.finance-metrics article').filter({has:page.locator('span',{hasText:label})}).locator('strong');}
@@ -22,11 +23,10 @@ test('возврат, расходы, завершение и полная вы�
   const form=addExpense.locator('form');await form.getByLabel('Сумма расхода').fill(amount);await form.getByLabel('Кто оплатил').selectOption(payer);await form.getByLabel('Описание расхода').fill(description);await save(form);
  }
  await expect(metric(page,'Расходы рейса')).toContainText('150');
- await page.getByRole('button',{name:'↗ Рейсы',exact:true}).click();
- const trip=page.locator('article.trip').filter({has:page.locator('.route',{hasText:'Ош'})});await trip.getByText('Завершить рейс',{exact:true}).click();
+ const trip=await openTrip(page,'Ош');await trip.getByText('Завершить рейс',{exact:true}).click();
  const completion=trip.locator('form').filter({has:page.locator('input[name=action][value=completeTrip]')});
  // Completing the trip removes the form; assert the persisted status instead of old form state.
- await completion.getByRole('button',{name:'Сохранить',exact:true}).click();await expect(trip.locator('.pill')).toContainText('Завершён');
+ await completion.getByRole('button',{name:'Сохранить',exact:true}).click();await expect(trip.locator('.trip-detail-header .status-pill')).toContainText('Завершён');await closeModal(page);
  await financeTrip(page);
  const approve=page.locator('form').filter({has:page.locator('input[name=action][value=approveSettlement]')});await approve.getByLabel('Вознаграждение').fill('300');await approve.getByLabel('Основание суммы').fill('Согласованное вознаграждение');await approve.getByRole('button',{name:'Сохранить',exact:true}).click();await expect(metric(page,'Осталось выплатить')).toContainText('350');
  const payout=()=>page.locator('form').filter({has:page.locator('input[name=action][value=payout]')});

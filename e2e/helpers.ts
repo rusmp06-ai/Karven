@@ -1,0 +1,11 @@
+import {expect,type Page,type Locator} from '@playwright/test';
+export async function login(page:Page,username='e2e-owner',password='e2e-owner-password-1234') {await page.goto('/login');await page.getByLabel('Логин',{exact:true}).fill(username);await page.getByLabel('Пароль',{exact:true}).fill(password);await page.getByRole('button',{name:'Войти',exact:true}).click();await expect(page.getByRole('button',{name:'Выйти',exact:true})).toBeVisible();}
+export async function save(form:Locator){await form.getByRole('button',{name:'Сохранить',exact:true}).click();await expect(form.getByRole('button',{name:'Сохранить',exact:true})).toBeEnabled();await expect(form.getByText('Сохранено',{exact:true})).toBeVisible();}
+export async function createTrip(page:Page,{origin,destination,day=3,capacity=4}:{origin:string;destination:string;day?:number;capacity?:number}) {
+ await page.getByRole('button',{name:'Создать рейс',exact:true}).click();const modal=page.getByRole('dialog',{name:'Создать рейс',exact:true});const form=modal.locator('form');await form.getByLabel('Откуда',{exact:true}).fill(origin);await form.getByLabel('Куда',{exact:true}).fill(destination);const date=new Date(Date.now()+day*86400000);await form.getByLabel('Дата и время').fill(new Date(date.getTime()-date.getTimezoneOffset()*60000).toISOString().slice(0,16));await form.getByLabel('Количество мест').fill(String(capacity));await save(form);await modal.getByRole('button',{name:'Закрыть окно'}).click();
+}
+export async function dispatch(page:Page){await page.getByRole('button',{name:'Диспетчерская',exact:true}).click();}
+export function tripRows(page:Page,origin:string){return page.locator('.schedule-row').filter({has:page.locator('.route',{hasText:origin})});}
+export async function selectTrip(page:Page,origin:string,index=0){const row=tripRows(page,origin).nth(index);await row.click();await expect(row).toHaveAttribute('aria-selected','true');}
+export async function openTrip(page:Page,origin:string,index=0){await dispatch(page);await selectTrip(page,origin,index);await page.getByRole('button',{name:'Открыть рейс',exact:true}).click();return page.getByRole('dialog').locator('article.trip').first();}
+export async function closeModal(page:Page){await page.getByRole('dialog').getByRole('button',{name:'Закрыть окно'}).click();}
