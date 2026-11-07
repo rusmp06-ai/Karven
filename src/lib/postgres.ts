@@ -2,6 +2,7 @@ import pg from 'pg';
 import {AsyncLocalStorage} from 'node:async_hooks';
 import type {PoolClient,PoolConfig} from 'pg';
 import {readFileSync} from 'node:fs';
+import {X509Certificate} from 'node:crypto';
 import type {Database,DbTransaction} from './database-types';
 const writeLock='746376001',applicationLock='746376002';
 export class DatabaseSetupError extends Error {}
@@ -15,7 +16,12 @@ export function postgresConfig(connectionString:string):PoolConfig{
  const local=['localhost','127.0.0.1','[::1]'].includes(url.hostname);
  // URL sslmode=require must not silently disable certificate verification.
  url.search='';
- let ca:string|undefined;try{if(process.env.PGSSLROOTCERT)ca=readFileSync(process.env.PGSSLROOTCERT,'utf8')}catch{throw new DatabaseSetupError('Не удалось прочитать PGSSLROOTCERT')}
+ let ca:string|undefined;
+ try{
+  if(process.env.PGSSLROOTCERT_PEM)ca=process.env.PGSSLROOTCERT_PEM.replace(/\\n/g,'\n').trim();
+  else if(process.env.PGSSLROOTCERT)ca=readFileSync(process.env.PGSSLROOTCERT,'utf8');
+  if(ca)new X509Certificate(ca);
+ }catch{throw new DatabaseSetupError('Не удалось прочитать сертификат PostgreSQL. Проверьте PGSSLROOTCERT_PEM или файл PGSSLROOTCERT')}
  return {connectionString:url.toString(),ssl:local?false:{rejectUnauthorized:true,...(ca?{ca}:{})},max:2,allowExitOnIdle:true,connectionTimeoutMillis:10000,idleTimeoutMillis:10000,application_name:'karven-crm'};
 }
 function transactionClient(client:PoolClient):DbTransaction{return {

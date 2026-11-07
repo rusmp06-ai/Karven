@@ -1,9 +1,10 @@
-import {beforeAll,beforeEach,afterAll,it,expect} from 'vitest';
+import {beforeAll,beforeEach,afterAll,it,expect,vi} from 'vitest';
 import {randomUUID} from 'node:crypto';
 import {mkdtemp,rm,readFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import pg from 'pg';
+import {rootCertificates} from 'node:tls';
 import {PostgresDatabase,postgresConfig,migratePostgres,checkPostgres,migrationSql} from '../src/lib/postgres';
 import {schema} from '../src/lib/schema';
 import {createCrm} from '../src/lib/crm';
@@ -78,3 +79,12 @@ it.skipIf(!enabled)('опубликованный установочный фа�
   await client.query('SET ROLE anon');await expect(client.query('SELECT * FROM karven.clients')).rejects.toMatchObject({code:'42501'});
  }finally{await client.end();await admin.query(`DROP DATABASE IF EXISTS "${fresh}" WITH (FORCE)`)}
 },30000);
+
+it('принимает CA из переменной Netlify, сохраняет проверку TLS и отклоняет испорченный сертификат',()=>{
+ const url='postgresql://user:password@aws-0-example.pooler.supabase.com:5432/postgres?sslmode=disable';
+ try{
+  const certificate=rootCertificates[0];vi.stubEnv('PGSSLROOTCERT_PEM',certificate);expect(postgresConfig(url).ssl).toMatchObject({rejectUnauthorized:true,ca:certificate.trim()});
+  vi.stubEnv('PGSSLROOTCERT_PEM',certificate.replaceAll('\n','\\n'));expect(postgresConfig(url).ssl).toMatchObject({rejectUnauthorized:true,ca:certificate.trim()});
+  vi.stubEnv('PGSSLROOTCERT_PEM','invalid-secret-content');expect(()=>postgresConfig(url)).toThrow('PGSSLROOTCERT_PEM');expect(()=>postgresConfig(url)).not.toThrow('invalid-secret-content');
+ }finally{vi.unstubAllEnvs()}
+});
