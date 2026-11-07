@@ -1,4 +1,11 @@
-BEGIN;SELECT pg_advisory_xact_lock(746376002::bigint);CREATE SCHEMA IF NOT EXISTS karven;REVOKE ALL ON SCHEMA karven FROM PUBLIC;SET LOCAL search_path TO karven,pg_catalog;
+-- KARVEN: выполнить целиком как один запрос. RLS включается внутри блока.
+DO $karven_install$
+BEGIN
+ PERFORM pg_advisory_xact_lock(746376002::bigint);
+ EXECUTE 'CREATE SCHEMA IF NOT EXISTS karven';
+ EXECUTE 'REVOKE ALL ON SCHEMA karven FROM PUBLIC';
+ PERFORM set_config('search_path','karven,pg_catalog',true);
+ EXECUTE $karven_schema$
 
 CREATE TABLE IF NOT EXISTS schema_migrations (version integer PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS clients (
@@ -184,9 +191,13 @@ IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=9) THEN
 END IF;
 END $$;
 
+$karven_schema$;
+ EXECUTE $karven_archive$
 CREATE SCHEMA IF NOT EXISTS karven_archive;
  CREATE TABLE IF NOT EXISTS karven_archive.backups(id uuid PRIMARY KEY,metadata jsonb NOT NULL,payload bytea NOT NULL CHECK(octet_length(payload)<=67108864));
  ALTER TABLE karven_archive.backups ENABLE ROW LEVEL SECURITY;
+$karven_archive$;
+ EXECUTE $karven_access$
 REVOKE ALL ON ALL TABLES IN SCHEMA karven FROM PUBLIC;REVOKE ALL ON SCHEMA karven_archive FROM PUBLIC;REVOKE ALL ON ALL TABLES IN SCHEMA karven_archive FROM PUBLIC;
    DO $$ DECLARE role_name text; table_name text; BEGIN
     FOREACH role_name IN ARRAY ARRAY['anon','authenticated','service_role'] LOOP
@@ -197,4 +208,7 @@ REVOKE ALL ON ALL TABLES IN SCHEMA karven FROM PUBLIC;REVOKE ALL ON SCHEMA karve
     END LOOP;
     FOR table_name IN SELECT tablename FROM pg_tables WHERE schemaname='karven' LOOP EXECUTE format('ALTER TABLE karven.%I ENABLE ROW LEVEL SECURITY',table_name); END LOOP;
    END $$;
-COMMIT;
+$karven_access$;
+ RAISE NOTICE 'KARVEN: installation complete, schema version 9';
+END
+$karven_install$;

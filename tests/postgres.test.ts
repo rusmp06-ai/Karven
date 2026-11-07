@@ -1,6 +1,6 @@
 import {beforeAll,beforeEach,afterAll,it,expect} from 'vitest';
 import {randomUUID} from 'node:crypto';
-import {mkdtemp,rm} from 'node:fs/promises';
+import {mkdtemp,rm,readFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import pg from 'pg';
@@ -64,3 +64,17 @@ it.skipIf(!enabled)('потеря соединения блокировки ос
 it.skipIf(!enabled)('SQL для редактора Supabase повторно подготавливает обе схемы без изменения public',async()=>{
  await db.exec(migrationSql(schema));await db.exec(migrationSql(schema));expect(await checkPostgres(db)).toEqual({schema:'karven',version:9});expect((await db.query('SELECT * FROM public.sentinel')).rows).toEqual([{id:7}]);
 });
+
+it.skipIf(!enabled)('опубликованный установочный файл работает на пустой базе с пустым search_path',async()=>{
+ const fresh=`${database}_install`;await admin.query(`CREATE DATABASE "${fresh}"`);
+ const url=new URL(process.env.KARVEN_PG_TEST_URL!);url.pathname=`/${fresh}`;const client=new pg.Client({connectionString:url.toString(),ssl:false});
+ try{
+  await client.connect();await client.query("CREATE TABLE public.sentinel(id integer);INSERT INTO public.sentinel VALUES(7);SET search_path TO ''");
+  const sql=await readFile(new URL('../docs/supabase-netlify.sql',import.meta.url),'utf8');expect(sql).toBe(migrationSql(schema));
+  await client.query(sql);await client.query(sql);
+  expect((await client.query('SELECT version FROM karven.schema_migrations ORDER BY version')).rows.map(r=>r.version)).toEqual([1,2,3,4,5,6,7,8,9]);
+  expect((await client.query('SELECT * FROM public.sentinel')).rows).toEqual([{id:7}]);
+  expect((await client.query("SELECT count(*)::integer AS n FROM pg_tables WHERE schemaname IN ('karven','karven_archive') AND rowsecurity")).rows[0].n).toBe(24);
+  await client.query('SET ROLE anon');await expect(client.query('SELECT * FROM karven.clients')).rejects.toMatchObject({code:'42501'});
+ }finally{await client.end();await admin.query(`DROP DATABASE IF EXISTS "${fresh}" WITH (FORCE)`)}
+},30000);

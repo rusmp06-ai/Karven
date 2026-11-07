@@ -89,4 +89,23 @@ export const privateAccessSql=`REVOKE ALL ON ALL TABLES IN SCHEMA karven FROM PU
     END LOOP;
     FOR table_name IN SELECT tablename FROM pg_tables WHERE schemaname='karven' LOOP EXECUTE format('ALTER TABLE karven.%I ENABLE ROW LEVEL SECURITY',table_name); END LOOP;
    END $$;`;
-export function migrationSql(schema:string){return `BEGIN;SELECT pg_advisory_xact_lock(${applicationLock}::bigint);CREATE SCHEMA IF NOT EXISTS karven;REVOKE ALL ON SCHEMA karven FROM PUBLIC;SET LOCAL search_path TO karven,pg_catalog;\n${schema}\n${archiveSchema}\n${privateAccessSql}\nCOMMIT;\n`}
+export function migrationSql(schema:string){return `-- KARVEN: выполнить целиком как один запрос. RLS включается внутри блока.
+DO $karven_install$
+BEGIN
+ PERFORM pg_advisory_xact_lock(${applicationLock}::bigint);
+ EXECUTE 'CREATE SCHEMA IF NOT EXISTS karven';
+ EXECUTE 'REVOKE ALL ON SCHEMA karven FROM PUBLIC';
+ PERFORM set_config('search_path','karven,pg_catalog',true);
+ EXECUTE $karven_schema$
+${schema}
+$karven_schema$;
+ EXECUTE $karven_archive$
+${archiveSchema}
+$karven_archive$;
+ EXECUTE $karven_access$
+${privateAccessSql}
+$karven_access$;
+ RAISE NOTICE 'KARVEN: installation complete, schema version 9';
+END
+$karven_install$;
+`}
