@@ -7,10 +7,10 @@ import type {ActionState} from './actions';
 export type BookingView=Omit<Booking,'departure_at'>&{departure_at:string};
 export type TripView=Omit<Trip,'departure_at'|'ends_at'|'completed_at'|'cancelled_at'>&{departure_at:string;ends_at:string;completed_at:string|null;cancelled_at:string|null};
 export const sourceLabels:Record<string,string>={phone:'Телефон',whatsapp:'WhatsApp',telegram:'Telegram',website:'Сайт',aggregator:'Агрегатор',other:'Другое'};
-export function OrderEditor({trips=[],selectedTripId,onSelectTrip,booking,onSaved}:{trips?:TripView[];selectedTripId?:string;onSelectTrip?:(id:string)=>void;booking?:BookingView;onSaved?:(state:ActionState)=>void}) {
+export function OrderEditor({trips=[],selectedTripId,onSelectTrip,booking,onSaved,contact}:{trips?:TripView[];selectedTripId?:string;onSelectTrip?:(id:string)=>void;booking?:BookingView;onSaved?:(state:ActionState)=>void;contact?:{name:string;phone:string}}) {
  const trip=trips.find(t=>t.id===selectedTripId)??trips[0];
- const [name,setName]=useState(booking?.name??'');
- const [phone,setPhone]=useState(booking?.phone?`+${booking.phone}`:'');
+ const [name,setName]=useState(booking?.name??contact?.name??'');
+ const [phone,setPhone]=useState(booking?.phone?`+${booking.phone}`:contact?`+${contact.phone}`:'');
  const [kind,setKind]=useState<'seats'|'vehicle'>(booking?.booking_type??'seats');
  const [price,setPrice]=useState('');
  const [initialPayment,setInitialPayment]=useState('0');

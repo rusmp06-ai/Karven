@@ -1,4 +1,5 @@
 'use server';
+import {createCustomerWorkspace} from '@/lib/customer-workspace';
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import { BusinessError, createCrm } from '@/lib/crm';
@@ -22,6 +23,8 @@ export async function mutate(_:ActionState,form:FormData):Promise<ActionState> {
   // Optional form values must remain absent, rather than empty UUID strings.
   if(data.driverId==='')delete data.driverId;
   switch(data.action) {
+   case 'clientNote':await createCustomerWorkspace(db,actor).addNote(data);break;
+   case 'task':await createCustomerWorkspace(db,actor).saveTask(data);break;
    case 'transferBooking':await operations.transfer(data);break;
    case 'resizeBooking':
     if(typeof data.passengers==='string'){try{data.passengers=JSON.parse(data.passengers);}catch{return {error:'Проверьте список пассажиров'};}}

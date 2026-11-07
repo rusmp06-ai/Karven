@@ -160,4 +160,15 @@ IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=6) THEN
 END IF;
 END $$;
 `;
-export const schema = schemaV1 + migrationV2 + migrationV3 + migrationV4 + migrationV5 + migrationV6;
+export const migrationV7 = `
+DO $$ BEGIN
+IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=7) THEN
+ CREATE TABLE client_notes(id uuid PRIMARY KEY,client_id uuid NOT NULL REFERENCES clients(id),body text NOT NULL CHECK(length(body) BETWEEN 1 AND 2000),author_id uuid NOT NULL REFERENCES users(id),created_at timestamptz NOT NULL DEFAULT now());
+ CREATE INDEX client_notes_client_idx ON client_notes(client_id);
+ CREATE TABLE work_tasks(id uuid PRIMARY KEY,title text NOT NULL CHECK(length(title) BETWEEN 3 AND 200),description text NOT NULL DEFAULT '',status text NOT NULL CHECK(status IN ('open','in_progress','done','cancelled')),assignee_id uuid NOT NULL REFERENCES users(id),client_id uuid REFERENCES clients(id),trip_id uuid REFERENCES trips(id),due_at timestamptz NOT NULL,version integer NOT NULL DEFAULT 1,created_by uuid NOT NULL REFERENCES users(id),created_at timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now());
+ CREATE INDEX work_tasks_due_idx ON work_tasks(status,due_at);
+ INSERT INTO schema_migrations(version) VALUES(7);
+END IF;
+END $$;
+`;
+export const schema = schemaV1 + migrationV2 + migrationV3 + migrationV4 + migrationV5 + migrationV6 + migrationV7;
