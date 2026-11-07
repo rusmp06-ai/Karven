@@ -171,4 +171,15 @@ IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=7) THEN
 END IF;
 END $$;
 `;
-export const schema = schemaV1 + migrationV2 + migrationV3 + migrationV4 + migrationV5 + migrationV6 + migrationV7;
+export const migrationV8 = `
+DO $$ BEGIN
+IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=8) THEN
+ CREATE TABLE park_settings(id uuid PRIMARY KEY CHECK(id='00000000-0000-4000-8000-000000000008'),name text NOT NULL CHECK(length(name) BETWEEN 1 AND 80),default_currency text NOT NULL CHECK(default_currency IN ('KGS','KZT','RUB','USD')),version integer NOT NULL DEFAULT 1);
+ INSERT INTO park_settings(id,name,default_currency) VALUES('00000000-0000-4000-8000-000000000008','KARVEN','KGS');
+ CREATE TABLE route_templates(id uuid PRIMARY KEY,origin text NOT NULL,destination text NOT NULL,currency text NOT NULL CHECK(currency IN ('KGS','KZT','RUB','USD')),capacity integer NOT NULL CHECK(capacity BETWEEN 1 AND 60),duration_minutes integer NOT NULL CHECK(duration_minutes BETWEEN 15 AND 10080),seat_minor integer CHECK(seat_minor BETWEEN 0 AND 999999999),vehicle_minor integer CHECK(vehicle_minor BETWEEN 0 AND 999999999),active boolean NOT NULL DEFAULT true,version integer NOT NULL DEFAULT 1,CHECK(lower(origin)<>lower(destination)));
+ CREATE UNIQUE INDEX route_templates_direction_currency_idx ON route_templates(lower(origin),lower(destination),currency);
+ INSERT INTO schema_migrations(version) VALUES(8);
+END IF;
+END $$;
+`;
+export const schema = schemaV1 + migrationV2 + migrationV3 + migrationV4 + migrationV5 + migrationV6 + migrationV7 + migrationV8;

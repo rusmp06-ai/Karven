@@ -107,5 +107,5 @@ it('водитель не управляет рейсами/составом, и
  expect((await createCrm(db,driver).dashboard()).bookings[0].history).toEqual([]);
 });
 it('миграция 5 сохраняет рейсы предыдущей версии и повторяется безопасно',async()=>{
- const old=new PGlite();try{await old.exec(schemaV1+migrationV2+migrationV3+migrationV4);await seedOwner(old);await old.exec(migrationV5);await old.exec(schema);expect((await old.query('SELECT * FROM users')).rows).toHaveLength(1);expect((await old.query('SELECT * FROM schema_migrations')).rows).toHaveLength(7);}finally{await old.close();}
+ const old=new PGlite();try{await old.exec(schemaV1+migrationV2+migrationV3+migrationV4);await seedOwner(old);await old.exec(migrationV5);await old.exec(schema);expect((await old.query('SELECT * FROM users')).rows).toHaveLength(1);expect((await old.query('SELECT * FROM schema_migrations')).rows).toHaveLength(8);}finally{await old.close();}
 });

@@ -1,4 +1,5 @@
 'use server';
+import {createParkSettings} from '@/lib/park-settings';
 import {createCustomerWorkspace} from '@/lib/customer-workspace';
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
@@ -23,6 +24,8 @@ export async function mutate(_:ActionState,form:FormData):Promise<ActionState> {
   // Optional form values must remain absent, rather than empty UUID strings.
   if(data.driverId==='')delete data.driverId;
   switch(data.action) {
+   case 'parkSettings':await createParkSettings(db,actor).savePark(data);break;
+   case 'routeTemplate':await createParkSettings(db,actor).saveRoute(data);break;
    case 'clientNote':await createCustomerWorkspace(db,actor).addNote(data);break;
    case 'task':await createCustomerWorkspace(db,actor).saveTask(data);break;
    case 'transferBooking':await operations.transfer(data);break;

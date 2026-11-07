@@ -134,6 +134,6 @@ it('миграция сохраняет данные версии 1 и повт�
   await legacy.exec(migrationV2);await legacy.exec(schema);
   const row=(await legacy.query<{origin:string;ends_at:Date}>('SELECT * FROM trips')).rows[0];
   expect(row.origin).toBe('А');expect(new Date(row.ends_at).getTime()).toBe(new Date(date(6)).getTime());
-  expect((await legacy.query('SELECT * FROM schema_migrations')).rows).toHaveLength(7);
+  expect((await legacy.query('SELECT * FROM schema_migrations')).rows).toHaveLength(8);
  } finally {await legacy.close();}
 });

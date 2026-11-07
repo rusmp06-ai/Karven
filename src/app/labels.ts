@@ -1,4 +1,5 @@
 export const auditLabels:Record<string,string>={
+ 'park.updated':'Обновлены настройки парка','route.created':'Добавлен типовой маршрут','route.updated':'Обновлён типовой маршрут',
  'client.note_added':'Добавлена заметка клиента','task.created':'Создана задача','task.updated':'Изменена задача',
  'trip.cancelled':'Отменён рейс','booking.transferred':'Перенесён заказ','booking.resized':'Изменено число пассажиров','passenger.attendance':'Отметка пассажира',
  'trip.completed':'Завершён рейс','booking.refunded':'Возвращены деньги пассажиру','expense.recorded':'Записан расход','expense.voided':'Аннулирован расход','settlement.approved':'Утверждён расчёт с водителем','driver.paid':'Записана выплата водителю',
