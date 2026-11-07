@@ -1,0 +1,34 @@
+'use client';
+import { useState } from 'react';
+import type { Booking, Trip } from '@/lib/crm';
+import type { Passenger } from '@/lib/orders';
+import { Field, SubmitForm } from './forms';
+export type BookingView=Omit<Booking,'departure_at'>&{departure_at:string};
+export type TripView=Omit<Trip,'departure_at'|'ends_at'|'completed_at'|'cancelled_at'>&{departure_at:string;ends_at:string;completed_at:string|null;cancelled_at:string|null};
+export const sourceLabels:Record<string,string>={phone:'Телефон',whatsapp:'WhatsApp',telegram:'Telegram',website:'Сайт',aggregator:'Агрегатор',other:'Другое'};
+export function OrderEditor({trips=[],selectedTripId,onSelectTrip,booking}:{trips?:TripView[];selectedTripId?:string;onSelectTrip?:(id:string)=>void;booking?:BookingView}) {
+ const trip=trips.find(t=>t.id===selectedTripId)??trips[0];
+ const [name,setName]=useState(booking?.name??'');
+ const [phone,setPhone]=useState(booking?.phone?`+${booking.phone}`:'');
+ const [kind,setKind]=useState<'seats'|'vehicle'>(booking?.booking_type??'seats');
+ const [count,setCount]=useState(booking?.passenger_count??1);
+ const [same,setSame]=useState(!booking);
+ const [passengers,setPassengers]=useState<Passenger[]>(booking?.passengers??[]);
+ const filled=Array.from({length:count},(_,i)=>i===0&&same?{name,phone}:passengers[i]??{name:'',phone:''});
+ const free=trip?trip.capacity-trip.occupied:0;
+ const updatePassenger=(index:number,field:'name'|'phone',value:string)=>setPassengers(current=>{
+  const copy=Array.from({length:count},(_,i)=>current[i]??{name:'',phone:''});copy[index]={...copy[index],[field]:value};return copy;
+ });
+ function reset() {if(!booking){setName('');setPhone('');setKind('seats');setCount(1);setSame(true);setPassengers([]);}}
+ if(!booking&&!trip)return <p className="muted">Нет будущих рейсов для бронирования.</p>;
+ return <SubmitForm action={booking?'bookingDetails':'booking'} onSuccess={reset} disabled={!booking&&(free===0||(kind==='vehicle'&&trip!.occupied>0))}>
+ {booking?<input name="bookingId" type="hidden" value={booking.id}/>:<><Field label="Рейс"><select name="tripId" value={trip!.id} onChange={e=>onSelectTrip?.(e.target.value)}>{trips.map(t=><option value={t.id} key={t.id}>{t.origin} → {t.destination} · {new Date(t.departure_at).toLocaleString('ru',{timeZone:'Asia/Bishkek'})} · {t.currency} · {t.capacity-t.occupied} мест</option>)}</select></Field><Field label="Тип заказа"><select name="bookingType" value={kind} onChange={e=>setKind(e.target.value as 'seats'|'vehicle')}><option value="seats">Отдельные места</option><option value="vehicle">Вся машина</option></select></Field><Field label="Число пассажиров"><input name="seats" type="number" min={1} max={kind==='vehicle'?trip!.capacity:Math.max(1,free)} required value={count} onChange={e=>setCount(Math.max(1,Math.min(60,Number(e.target.value)||1)))}/></Field>{kind==='vehicle'&&<p className="muted">Машина резервируется целиком: {trip!.capacity} мест. Другие заказы в этот рейс будут закрыты.</p>}{kind==='vehicle'&&trip!.occupied>0&&<p className="error" role="status">Для заказа всей машины выберите рейс без других бронирований.</p>}{free===0&&<p role="status" className="error">В рейсе нет свободных мест.</p>}</>}
+ <fieldset><legend>Заказчик</legend><Field label="Имя клиента"><input name="name" value={name} onChange={e=>setName(e.target.value)} required maxLength={120}/></Field><Field label="Телефон с кодом страны"><input name="phone" type="tel" value={phone} onChange={e=>setPhone(e.target.value)} required maxLength={25} placeholder="+996 …"/></Field></fieldset>
+ <fieldset><legend>Пассажиры · {count}</legend><label className="check-label"><input type="checkbox" checked={same} onChange={e=>setSame(e.target.checked)}/>Заказчик — первый пассажир</label>{filled.map((p,i)=>same&&i===0?<p className="muted" key={i}>1. {name||'Имя из карточки заказчика'}</p>:<div className="passenger-entry" key={i}><Field label={`Пассажир ${i+1}: имя`}><input value={p.name} required maxLength={120} onChange={e=>updatePassenger(i,'name',e.target.value)}/></Field><Field label={`Пассажир ${i+1}: телефон (необязательно)`}><input type="tel" value={p.phone} maxLength={25} onChange={e=>updatePassenger(i,'phone',e.target.value)}/></Field></div>)}<input name="passengers" type="hidden" value={JSON.stringify(filled)}/></fieldset>
+ <Field label="Адрес посадки"><input name="pickupAddress" maxLength={500} defaultValue={booking?.pickup_address} placeholder="Улица, дом, ориентир"/></Field><Field label="Адрес высадки"><input name="dropoffAddress" maxLength={500} defaultValue={booking?.dropoff_address}/></Field><Field label="Багаж"><input name="luggage" maxLength={500} defaultValue={booking?.luggage} placeholder="Например, 2 чемодана"/></Field><Field label="Детских кресел"><input name="childSeats" type="number" min={0} max={count} defaultValue={booking?.child_seats??0}/></Field><Field label="Источник заявки"><select name="source" defaultValue={booking?.source??'phone'}>{Object.entries(sourceLabels).map(([value,label])=><option value={value} key={value}>{label}</option>)}</select></Field>
+ {!booking&&<Field label={`Общая стоимость (${trip!.currency})`}><input name="total" inputMode="decimal" placeholder="1500.00" required pattern="[0-9]+(\.[0-9]{1,2})?"/></Field>}<Field label="Внутренний комментарий"><textarea name="note" maxLength={1000} defaultValue={booking?.note}/></Field><p className="muted">{booking?'Изменение контактов и деталей не меняет цену и число забронированных мест.':'Цена указывается за весь заказ. Оплату можно внести после создания брони.'}</p>
+ </SubmitForm>;
+}
+export function OrderDetails({booking,driverOnly}:{booking:BookingView;driverOnly:boolean}) {
+ return <div className="order-details"><div className="order-route"><span>Посадка</span><strong>{booking.pickup_address||'Адрес не указан'}</strong><span>Высадка</span><strong>{booking.dropoff_address||'Адрес не указан'}</strong></div><p><b>{booking.booking_type==='vehicle'?'Вся машина':'Отдельные места'}</b> · {booking.passenger_count} пассажиров · {booking.seats} мест зарезервировано</p><p>Багаж: {booking.luggage||'Не указан'} · Детских кресел: {booking.child_seats}</p><details><summary>Пассажиры и контакты</summary><ol className="passenger-list">{booking.passengers.map((p,i)=><li key={i}>{p.name}{p.phone&&<> · <a href={`tel:+${p.phone}`}>+{p.phone}</a></>}</li>)}</ol>{booking.passengers.length<booking.passenger_count&&<p className="muted">Имена остальных пассажиров не указаны в старой брони.</p>}</details>{!driverOnly&&<><p className="muted">Источник: {sourceLabels[booking.source]??booking.source} · Заказ {booking.id.slice(0,8)}</p>{booking.status==='confirmed'&&booking.trip_status==='scheduled'&&booking.attendance.length===0&&<details><summary>Изменить карточку заказа</summary><OrderEditor booking={booking}/></details>}</>}</div>;
+}
