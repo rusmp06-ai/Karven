@@ -1,6 +1,6 @@
 import {queueBookingTelegram} from './telegram-queue';
 import { randomUUID } from 'node:crypto';
-import { PGlite } from '@electric-sql/pglite';
+import type {Database} from './database-types';
 import { z } from 'zod';
 import { type Actor, requireRole } from './access';
 import { recordAudit, type Tx } from './audit';
@@ -31,7 +31,7 @@ export const bookingInput = detailsInput.extend({
 });
 export const paymentInput = z.object({ bookingId: uuid, amount: money, method: z.enum(['cash', 'transfer', 'card']), requestId: z.string().uuid().default(()=>randomUUID()) });
 
-export function createCrm(db: PGlite, actor:Actor) {
+export function createCrm(db: Database, actor:Actor) {
   async function audit(tx:Tx,id:string,action:string,details:object) {
     await recordAudit(tx,actor,id,action,details);
   }

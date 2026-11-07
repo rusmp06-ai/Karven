@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { PGlite } from '@electric-sql/pglite';
+import type {Database} from './database-types';
 import { z } from 'zod';
 import { type Actor, requireRole } from './access';
 import { recordAudit } from './audit';
@@ -8,7 +8,7 @@ const name=z.string().trim().min(1).max(120);
 const uuid=z.string().uuid();
 export type Driver={id:string;name:string;phone:string;kind:'staff'|'partner';status:'available'|'unavailable';license_number:string;license_expires:string};
 export type Vehicle={id:string;plate:string;model:string;capacity:number;owner_name:string;kind:'park'|'partner';status:'available'|'maintenance'|'unavailable'};
-export function createFleet(db:PGlite,actor:Actor) {
+export function createFleet(db:Database,actor:Actor) {
  return {
   async list() {
    requireRole(actor,'owner','dispatcher');
@@ -48,7 +48,7 @@ export function createFleet(db:PGlite,actor:Actor) {
    requireRole(actor,'owner','dispatcher');
    const input=z.object({tripId:uuid,driverId:uuid,vehicleId:uuid,endsAt:z.iso.datetime({offset:true})}).parse(raw);
    await db.transaction(async tx=>{
-    // PGlite serializes transactions. Row locks preserve the intent for a server PostgreSQL adapter.
+    // The database adapter serializes business writes; row locks protect assigned resources.
     const trip=(await tx.query<{departure_at:Date;status:string;driver_id:string|null;vehicle_id:string|null}>('SELECT * FROM trips WHERE id=$1 FOR UPDATE',[input.tripId])).rows[0];
     if(!trip)throw new BusinessError('Рейс не найден');
     if((trip.driver_id!==input.driverId||trip.vehicle_id!==input.vehicleId)&&(await tx.query("SELECT a.booking_id FROM passenger_attendance a JOIN bookings b ON b.id=a.booking_id WHERE b.trip_id=$1 AND b.status='confirmed' LIMIT 1",[input.tripId])).rows.length)throw new BusinessError('Сначала исправьте отметки пассажиров перед заменой водителя или автомобиля');

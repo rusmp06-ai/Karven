@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual, createHash } from 'node:crypto';
 import { promisify } from 'node:util';
-import { PGlite } from '@electric-sql/pglite';
+import type {Database} from './database-types';
 import { z } from 'zod';
 import { type Actor, requireRole } from './access';
 import { recordAudit } from './audit';
@@ -21,8 +21,9 @@ export async function verifyPassword(password:string,encoded:string) {
  const actual=await scrypt(password,salt,64) as Buffer;
  return expected.length===actual.length && timingSafeEqual(actual,expected);
 }
-export async function bootstrapOwner(db:PGlite) {
- const {rows}=await db.query('SELECT id FROM users LIMIT 1');
+export async function bootstrapOwner(db:Database) {
+ await db.transaction(async tx=>{
+ const {rows}=await tx.query('SELECT id FROM users LIMIT 1');
  if(rows.length)return;
  const username=process.env.CRM_ADMIN_USER;
  const password=process.env.CRM_ADMIN_PASSWORD;
@@ -30,15 +31,12 @@ export async function bootstrapOwner(db:PGlite) {
  const normalized=loginName.parse(username);
  passwordInput.parse(password);
  const hash=await hashPassword(password);
- await db.transaction(async tx=>{
-  const existing=await tx.query('SELECT id FROM users LIMIT 1');
-  if(existing.rows.length)return;
   const id=randomUUID();
   await tx.query("INSERT INTO users(id,username,name,password_hash,role) VALUES($1,$2,$3,$4,'owner')",[id,normalized,'Владелец',hash]);
   await recordAudit(tx,{id,name:'Владелец',username:normalized,role:'owner',driver_id:null},id,'user.bootstrapped');
  });
 }
-export function createAuth(db:PGlite) {
+export function createAuth(db:Database) {
  return {
   async login(raw:unknown) {
    const input=z.object({username:loginName,password:z.string().min(1).max(128)}).parse(raw);

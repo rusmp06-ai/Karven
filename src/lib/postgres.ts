@@ -1,0 +1,68 @@
+import pg from 'pg';
+import type {PoolClient,PoolConfig} from 'pg';
+import {readFileSync} from 'node:fs';
+import type {Database,DbTransaction} from './database-types';
+const writeLock='746376001',applicationLock='746376002';
+export class DatabaseSetupError extends Error {}
+export function postgresConfig(connectionString:string):PoolConfig{
+ let url:URL;try{url=new URL(connectionString)}catch{throw new DatabaseSetupError('Проверьте DATABASE_URL: требуется строка PostgreSQL из Connect')}
+ if(!['postgres:','postgresql:'].includes(url.protocol)||!url.hostname||!url.username||!url.pathname.slice(1))throw new DatabaseSetupError('DATABASE_URL должен содержать PostgreSQL host, user и database');
+ if(url.hostname.endsWith('.pooler.supabase.com')&&url.port==='6543')throw new DatabaseSetupError('Выберите Supabase Session pooler, порт 5432, вместо Transaction pooler');
+ const local=['localhost','127.0.0.1','[::1]'].includes(url.hostname);
+ // URL sslmode=require must not silently disable certificate verification.
+ url.search='';
+ let ca:string|undefined;try{if(process.env.PGSSLROOTCERT)ca=readFileSync(process.env.PGSSLROOTCERT,'utf8')}catch{throw new DatabaseSetupError('Не удалось прочитать PGSSLROOTCERT')}
+ return {connectionString:url.toString(),ssl:local?false:{rejectUnauthorized:true,...(ca?{ca}:{})},max:5,connectionTimeoutMillis:10000,idleTimeoutMillis:30000,application_name:'karven-crm'};
+}
+function transactionClient(client:PoolClient):DbTransaction{return {
+ async query<T>(sql:string,params?:unknown[]){const result=await client.query(sql,params);return {rows:result.rows as T[]}},
+ async exec(sql:string){await client.query(sql)},
+};}
+export class PostgresDatabase implements Database {
+ private pool:pg.Pool;
+ private lease:PoolClient|null=null;
+ private leaseLost=false;
+ private initialized=new WeakSet<PoolClient>();
+ private assertLease(){if(this.leaseLost)throw new DatabaseSetupError('Связь с базой прервана. Перезапустите сервер CRM')}
+ constructor(connectionString:string){this.pool=new pg.Pool(postgresConfig(connectionString));this.pool.on('error',()=>{console.error('PostgreSQL idle connection error')});this.pool.on('connect',client=>{client.on('error',()=>{if(client===this.lease)this.leaseLost=true})});}
+ private async connect(){
+  this.assertLease();const client=await this.pool.connect();
+  try{if(!this.initialized.has(client)){await client.query("SET search_path TO karven,pg_catalog;SET TIME ZONE 'UTC';SET statement_timeout='30s'");this.initialized.add(client)}return client}catch(error){client.release(true);throw error}
+ }
+ async query<T=Record<string,unknown>>(sql:string,params?:unknown[]){const client=await this.connect();try{return await transactionClient(client).query<T>(sql,params)}finally{client.release()}}
+ async exec(sql:string){const client=await this.connect();try{await client.query(sql)}finally{client.release()}}
+ async transaction<T>(work:(tx:DbTransaction)=>Promise<T>):Promise<T>{
+  const client=await this.connect();let broken=false;
+  try{await client.query('BEGIN');await client.query('SELECT pg_advisory_xact_lock($1::bigint)',[writeLock]);const result=await work(transactionClient(client));await client.query('COMMIT');return result}
+  catch(error){try{await client.query('ROLLBACK')}catch{broken=true}throw error}
+  finally{client.release(broken)}
+ }
+ async acquireApplicationLease(){
+  if(this.lease)return;const client=await this.connect();
+  try{const result=await client.query<{locked:boolean}>('SELECT pg_try_advisory_lock($1::bigint) AS locked',[applicationLock]);if(!result.rows[0].locked)throw new DatabaseSetupError('Эта база уже открыта другим сервером CRM. Остановите его перед переключением');this.lease=client}
+  catch(error){client.release();throw error}
+ }
+ async close(){if(this.lease){const client=this.lease;this.lease=null;try{await client.query('SELECT pg_advisory_unlock($1::bigint)',[applicationLock]);client.release()}catch{client.release(true)}}await this.pool.end()}
+}
+export async function migratePostgres(db:PostgresDatabase,schema:string){
+ await db.acquireApplicationLease();
+ await db.transaction(async tx=>{
+  await tx.exec('CREATE SCHEMA IF NOT EXISTS karven; REVOKE ALL ON SCHEMA karven FROM PUBLIC');
+  await tx.exec(schema);
+  await tx.exec(`REVOKE ALL ON ALL TABLES IN SCHEMA karven FROM PUBLIC;
+   DO $$ DECLARE role_name text; table_name text; BEGIN
+    FOREACH role_name IN ARRAY ARRAY['anon','authenticated','service_role'] LOOP
+     IF EXISTS(SELECT 1 FROM pg_roles WHERE rolname=role_name) THEN
+      EXECUTE format('REVOKE ALL ON SCHEMA karven FROM %I',role_name);
+      EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA karven FROM %I',role_name);
+     END IF;
+    END LOOP;
+    FOR table_name IN SELECT tablename FROM pg_tables WHERE schemaname='karven' LOOP EXECUTE format('ALTER TABLE karven.%I ENABLE ROW LEVEL SECURITY',table_name); END LOOP;
+   END $$;`);
+ });
+}
+export async function checkPostgres(db:PostgresDatabase){
+ const result=await db.query<{schema:string;version:number}>("SELECT current_schema() AS schema,(SELECT max(version)::integer FROM schema_migrations) AS version");
+ if(result.rows[0]?.schema!=='karven'||result.rows[0]?.version!==9)throw new DatabaseSetupError('База CRM не подготовлена. Выполните npm run db:migrate');
+ return {schema:'karven',version:9};
+}

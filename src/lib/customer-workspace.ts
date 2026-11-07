@@ -1,6 +1,6 @@
 import {randomUUID} from 'node:crypto';
 import {z} from 'zod';
-import type {PGlite} from '@electric-sql/pglite';
+import type {Database} from './database-types';
 import {requireRole,type Actor} from './access';
 import {BusinessError} from './crm';
 import {recordAudit} from './audit';
@@ -13,7 +13,7 @@ export type CustomerWorkspace={clients:Customer[];notes:CustomerNote[];movements
 export const emptyWorkspace:CustomerWorkspace={clients:[],notes:[],movements:[],tasks:[],assignees:[]};
 const optionalId=z.union([z.uuid(),z.literal('')]).default('').transform(v=>v||null);
 const taskInput=z.object({id:optionalId,version:z.coerce.number().int().min(1).default(1),title:z.string().trim().min(3).max(200),description:z.string().trim().max(2000).default(''),status:z.enum(['open','in_progress','done','cancelled']).default('open'),assigneeId:z.uuid(),clientId:optionalId,tripId:optionalId,dueAt:z.iso.datetime({offset:true}),requestId:z.uuid()});
-export function createCustomerWorkspace(db:PGlite,actor:Actor){
+export function createCustomerWorkspace(db:Database,actor:Actor){
  const access=()=>requireRole(actor,'owner','dispatcher');
  return {
   async list():Promise<CustomerWorkspace>{

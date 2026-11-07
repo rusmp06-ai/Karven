@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { PGlite } from '@electric-sql/pglite';
+import type {Database} from './database-types';
 import { z } from 'zod';
 import { type Actor, requireRole, AccessError } from './access';
 import { recordAudit, type Tx } from './audit';
@@ -26,7 +26,7 @@ async function requireUnmarked(tx:Tx,id:string) {
 function requireFuture(trip:TripRow) {
  if(trip.status!=='scheduled'||new Date(trip.departure_at).getTime()<=Date.now())throw new BusinessError('Операция доступна только до отправления запланированного рейса');
 }
-export function createTripOperations(db:PGlite,actor:Actor) {
+export function createTripOperations(db:Database,actor:Actor) {
  return {
   async transfer(raw:unknown) {
    requireRole(actor,'owner','dispatcher');

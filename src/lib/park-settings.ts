@@ -1,6 +1,6 @@
 import {randomUUID} from 'node:crypto';
 import {z} from 'zod';
-import type {PGlite} from '@electric-sql/pglite';
+import type {Database} from './database-types';
 import {requireRole,type Actor} from './access';
 import {BusinessError,toMinor} from './crm';
 import {once} from './idempotency';
@@ -9,7 +9,7 @@ import {parkCurrencies,type ParkSettings,type RouteTemplate,type ParkConfig} fro
 const settingsId='00000000-0000-4000-8000-000000000008';
 const text=z.string().trim().min(1).max(120).transform(s=>s.replace(/\s+/g,' '));
 const price=z.string().default('').transform(v=>v===''?null:toMinor(v));
-export function createParkSettings(db:PGlite,actor:Actor){return {
+export function createParkSettings(db:Database,actor:Actor){return {
  async list():Promise<ParkConfig>{
   requireRole(actor,'owner','dispatcher','driver');
   const park=(await db.query<ParkSettings>('SELECT name,default_currency,version FROM park_settings WHERE id=$1',[settingsId])).rows[0];

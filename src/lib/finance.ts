@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { PGlite } from '@electric-sql/pglite';
+import type {Database} from './database-types';
 import { z } from 'zod';
 import { type Actor, requireRole } from './access';
 import { recordAudit, type Tx } from './audit';
@@ -18,7 +18,7 @@ async function tripLock(tx:Tx,id:string) {
 async function unlockedExpenses(tx:Tx,id:string) {
  if((await tx.query('SELECT trip_id FROM driver_settlements WHERE trip_id=$1',[id])).rows.length)throw new BusinessError('Расчёт уже утверждён: расходы зафиксированы');
 }
-export function createFinance(db:PGlite,actor:Actor) {
+export function createFinance(db:Database,actor:Actor) {
  return {
   async completeTrip(raw:unknown) {
    requireRole(actor,'owner','dispatcher');

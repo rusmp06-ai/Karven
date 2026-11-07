@@ -3,6 +3,7 @@ import {mkdir,readFile,rename,readdir,stat,open,rm,mkdtemp} from 'node:fs/promis
 import path from 'node:path';
 import {tmpdir} from 'node:os';
 import {PGlite} from '@electric-sql/pglite';
+import type {Database} from './database-types';
 import {z} from 'zod';
 import {schema} from './schema';
 import {BusinessError} from './crm';
@@ -33,13 +34,13 @@ async function atomicFile(filename:string,data:string|Uint8Array){
  try{await rename(temp,filename);await syncDirectory(path.dirname(filename))}finally{await rm(temp,{force:true})}
 }
 function location(root:string,id:string){return path.join(root,z.uuid().parse(id))}
-async function columns(db:Tx|PGlite){
- const rows=(await db.query<{table_name:string;column_name:string;udt_name:string}>("SELECT table_name,column_name,udt_name FROM information_schema.columns WHERE table_schema='public' ORDER BY table_name,ordinal_position")).rows;
+async function columns(db:Tx|Database){
+ const rows=(await db.query<{table_name:string;column_name:string;udt_name:string}>("SELECT table_name,column_name,udt_name FROM information_schema.columns WHERE table_schema=current_schema() ORDER BY table_name,ordinal_position")).rows;
  const result:Record<string,string[]>={};for(const row of rows)(result[row.table_name]??=[]).push(`${row.column_name}:${row.udt_name}`);
  if(JSON.stringify(Object.keys(result).sort())!==JSON.stringify([...allTables].sort()))throw new BusinessError('Структура базы не поддерживается этой версией резервного копирования');
  return result;
 }
-async function capture(db:Tx|PGlite):Promise<Snapshot>{
+async function capture(db:Tx|Database):Promise<Snapshot>{
  const versions=(await db.query<{version:number}>('SELECT version FROM schema_migrations ORDER BY version')).rows.map(r=>r.version);
  if(JSON.stringify(versions)!==JSON.stringify([1,2,3,4,5,6,7,8,9]))throw new BusinessError('Версия базы несовместима с резервным копированием');
  const layout=await columns(db),tables:Record<string,string>={};
@@ -56,7 +57,7 @@ async function replace(db:Tx,snapshot:Snapshot){
  if(snapshot.schemaVersion===8)await db.exec('INSERT INTO schema_migrations(version) VALUES(9)');
  await db.exec('INSERT INTO telegram_settings(id) VALUES(1)');
 }
-async function checks(db:Tx|PGlite){
+async function checks(db:Tx|Database){
  const layout=await columns(db),extra:string[]=[];
  for(const [table,fields] of Object.entries(layout))for(const field of fields){const [name,type]=field.split(':');
   if(['date','timestamp','timestamptz'].includes(type))extra.push(`EXISTS(SELECT 1 FROM "${table}" WHERE "${name}" IS NOT NULL AND (NOT isfinite("${name}") OR "${name}" < TIMESTAMP '0001-01-01' OR "${name}" >= TIMESTAMP '10000-01-01'))`);
@@ -90,7 +91,7 @@ async function verifySnapshot(snapshot:Snapshot){
   return counts;
  }finally{try{if(db)await db.close()}finally{await rm(directory,{recursive:true,force:true})}}
 }
-export function createBackups(db:PGlite,actor:Actor,root=backupDirectory()){
+export function createBackups(db:Database,actor:Actor,root=backupDirectory()){
  const access=()=>requireRole(actor,'owner');
  async function metadata(id:string):Promise<BackupInfo>{
   const dir=location(root,id);

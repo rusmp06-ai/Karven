@@ -2,7 +2,7 @@ import {randomBytes,createCipheriv,createDecipheriv} from 'node:crypto';
 import {mkdir,readFile,open} from 'node:fs/promises';
 import path from 'node:path';
 import * as http from 'node:http';
-import {PGlite} from '@electric-sql/pglite';
+import type {Database} from './database-types';
 import {z} from 'zod';
 import {BusinessError} from './crm';
 import {requireRole,type Actor} from './access';
@@ -39,8 +39,8 @@ export const sendTelegram:TelegramTransport=async(token,chatId,text)=>{
   return {status:'failed',error:'Telegram отклонил сообщение. Проверьте ID чата и доступ бота'};
  }catch{return {status:'unknown',error:'Нет подтверждения доставки. Проверьте соединение и чат перед повтором'}}
 };
-async function settings(db:PGlite){return (await db.query<Settings>('SELECT enabled,encrypted_token,chat_id,version,last_test_at,last_test_error FROM telegram_settings WHERE id=1')).rows[0]}
-export function createTelegram(db:PGlite,actor:Actor,transport:TelegramTransport=sendTelegram){
+async function settings(db:Database){return (await db.query<Settings>('SELECT enabled,encrypted_token,chat_id,version,last_test_at,last_test_error FROM telegram_settings WHERE id=1')).rows[0]}
+export function createTelegram(db:Database,actor:Actor,transport:TelegramTransport=sendTelegram){
  const access=()=>requireRole(actor,'owner');
  return {
   async view():Promise<TelegramView>{access();const s=await settings(db);const deliveries=(await db.query<TelegramDelivery>('SELECT booking_id,status,attempts,last_error,created_at,sent_at FROM telegram_outbox ORDER BY created_at DESC,booking_id LIMIT 30')).rows.map(d=>({...d,created_at:new Date(d.created_at).toISOString(),sent_at:d.sent_at?new Date(d.sent_at).toISOString():null}));return {enabled:s.enabled,tokenConfigured:!!s.encrypted_token,chatId:s.chat_id,version:s.version,lastTestAt:s.last_test_at?new Date(s.last_test_at).toISOString():null,lastTestError:s.last_test_error,deliveries};},
@@ -60,7 +60,7 @@ export function createTelegram(db:PGlite,actor:Actor,transport:TelegramTransport
   async retry(raw:unknown){access();const input=z.object({bookingId:z.uuid(),confirmed:z.literal('yes'),requestId:z.uuid()}).parse(raw);await db.transaction(tx=>once(tx,actor,input.requestId,'telegram.retry',input,async()=>{const s=(await tx.query<Settings>('SELECT * FROM telegram_settings WHERE id=1')).rows[0];if(!s.enabled||!s.encrypted_token)throw new BusinessError('Сначала включите подключение Telegram');const row=(await tx.query<{status:string;settings_version:number}>('SELECT status,settings_version FROM telegram_outbox WHERE booking_id=$1 FOR UPDATE',[input.bookingId])).rows[0];if(!row||!['failed','unknown','cancelled'].includes(row.status))throw new BusinessError('Это уведомление недоступно для повтора');await tx.query("UPDATE telegram_outbox SET status='pending',attempts=0,last_error=NULL,next_attempt_at=now(),settings_version=$2 WHERE booking_id=$1",[input.bookingId,s.version]);await recordAudit(tx,actor,input.bookingId,'telegram.retried');}));},
  };
 }
-export async function deliverNextTelegram(db:PGlite,transport:TelegramTransport=sendTelegram){
+export async function deliverNextTelegram(db:Database,transport:TelegramTransport=sendTelegram){
  const job=await withWorkspace(()=>db.transaction(async tx=>{
   const s=(await tx.query<Settings>('SELECT * FROM telegram_settings WHERE id=1')).rows[0];if(!s.enabled||!s.encrypted_token)return null;
   await tx.query("UPDATE telegram_outbox SET status='cancelled',last_error='Настройки подключения изменены' WHERE status='pending' AND settings_version<>$1",[s.version]);
@@ -81,9 +81,9 @@ export async function deliverNextTelegram(db:PGlite,transport:TelegramTransport=
  }));
  return true;
 }
-const worker=globalThis as typeof globalThis&{karvenTelegramWorker?:{db:PGlite;timer:ReturnType<typeof setInterval>;running:Promise<void>|null}};
+const worker=globalThis as typeof globalThis&{karvenTelegramWorker?:{db:Database;timer:ReturnType<typeof setInterval>;running:Promise<void>|null}};
 export async function waitForTelegramDelivery(){await worker.karvenTelegramWorker?.running;}
-export function startTelegramWorker(db:PGlite){
+export function startTelegramWorker(db:Database){
  if(worker.karvenTelegramWorker)return;
  const state={db,timer:undefined as unknown as ReturnType<typeof setInterval>,running:null as Promise<void>|null};worker.karvenTelegramWorker=state;
  state.timer=setInterval(()=>{if(state.running)return;state.running=(async()=>{try{await deliverNextTelegram(db)}catch{/* no secrets or request URLs in logs */}})().finally(()=>{state.running=null})},3000);state.timer.unref();
