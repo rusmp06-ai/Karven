@@ -1,5 +1,5 @@
 import {test,expect} from '@playwright/test';
-import {login,createTrip,dispatch,selectTrip,tripRows,save,openTrip,closeModal} from './helpers';
+import {openActions,login,createTrip,dispatch,selectTrip,tripRows,save,openTrip,closeModal} from './helpers';
 
 test('рейс сохраняет 8 мест после создания и перезагрузки',async({page})=>{
  await login(page);await createTrip(page,{origin:'Аудит восьми мест',destination:'Нарын аудит',day:5,capacity:8});
@@ -26,13 +26,13 @@ test('назначение требует подтверждения смены 
   await vehicle.getByLabel('Госномер').fill(`AUDIT${capacity}`);await vehicle.getByLabel('Модель').fill(`Авто ${capacity}`);await vehicle.getByLabel('Пассажирских мест').fill(String(capacity));await vehicle.getByLabel('Владелец',{exact:true}).fill('Аудит');
   await expect(vehicle.getByText('Сохранено',{exact:true})).toHaveCount(0);await save(vehicle.locator('form'));
  }
- const trip=await openTrip(page,'Аудит назначения');await trip.getByText('Назначить или заменить',{exact:true}).click();const form=trip.locator('form').filter({has:page.locator('input[name=action][value=assign]')});
+ const trip=await openTrip(page,'Аудит назначения');await openActions(trip,'Действия с рейсом');await trip.getByText('Назначить или заменить',{exact:true}).click();const form=trip.locator('form').filter({has:page.locator('input[name=action][value=assign]')});
  await form.getByLabel('Водитель',{exact:true}).selectOption({label:'Водитель аудита'});await form.getByLabel('Автомобиль',{exact:true}).selectOption({label:'AUDIT4 · Авто 4 · 4 мест'});
  const confirmation=form.getByRole('checkbox',{name:'Подтверждаю изменение вместимости с 8 до 4 мест'});await expect(confirmation).not.toBeChecked();await expect(form.getByRole('button',{name:'Сохранить',exact:true})).toBeDisabled();await expect(trip.locator('.seats')).toContainText('из 8');
- await form.getByLabel('Автомобиль',{exact:true}).selectOption({label:'AUDIT8 · Авто 8 · 8 мест'});await expect(form.getByRole('button',{name:'Сохранить',exact:true})).toBeEnabled();
+ await form.getByLabel('Автомобиль',{exact:true}).selectOption({label:'AUDIT8 · Авто 8 · 8 мест'});await expect(form.locator('button[type=submit]')).toBeEnabled();
  await form.getByLabel('Автомобиль',{exact:true}).selectOption({label:'AUDIT4 · Авто 4 · 4 мест'});await confirmation.check();await save(form);await expect(trip.locator('.seats')).toContainText('из 4');
  await expect(form.getByLabel('Автомобиль',{exact:true}).locator('option:checked')).toHaveText('AUDIT4 · Авто 4 · 4 мест');await expect(form.getByLabel('Водитель',{exact:true}).locator('option:checked')).toHaveText('Водитель аудита');
- const end=form.getByLabel('Плановое окончание');await end.fill('');await expect(end).toHaveValue('');await end.fill(new Date(Date.now()+7*86400000).toISOString().slice(0,16));await save(form);
+ await openActions(trip,'Действия с рейсом');const end=form.getByLabel('Плановое окончание');await end.fill('');await expect(end).toHaveValue('');await end.fill(new Date(Date.now()+7*86400000).toISOString().slice(0,16));await save(form);
  await closeModal(page);await page.goto('/');await dispatch(page);await selectTrip(page,'Аудит назначения');await expect(tripRows(page,'Аудит назначения').locator('.seat-count')).toHaveText('0 / 4');
 });
 

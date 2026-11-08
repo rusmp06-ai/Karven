@@ -1,8 +1,8 @@
 import { test, expect, type Page, type Locator } from '@playwright/test';
-import {openTrip,closeModal} from './helpers';
+import {openActions,openTrip,closeModal} from './helpers';
 async function save(form:Locator) {
  await form.getByRole('button',{name:'Сохранить',exact:true}).click();
- await expect(form.getByRole('button',{name:'Сохранить',exact:true})).toBeEnabled();await expect(form.getByText('Сохранено',{exact:true})).toBeVisible();
+ await expect(form.locator('button[type=submit]')).toBeEnabled();await expect(form.getByText('Сохранено',{exact:true})).toHaveText('Сохранено');
 }
 async function financeTrip(page:Page) {
  await page.getByRole('button',{name:'Финансы',exact:true}).click();
@@ -13,7 +13,7 @@ test('возврат, расходы, завершение и полная вы�
  await page.goto('/login');await page.getByLabel('Логин',{exact:true}).fill('e2e-owner');await page.getByLabel('Пароль',{exact:true}).fill('e2e-owner-password-1234');await page.getByRole('button',{name:'Войти',exact:true}).click();
  await page.getByRole('button',{name:'Бронирования'}).click();
  const booking=page.locator('article.booking').filter({has:page.getByRole('heading',{name:'Финансовый пассажир',exact:true})});
- await booking.getByText('Частичный возврат',{exact:true}).click();const refund=booking.locator('form').filter({has:page.locator('input[name=action][value=refund]')});
+ await openActions(booking,'Действия с бронью');await booking.getByText('Частичный возврат',{exact:true}).click();const refund=booking.locator('form').filter({has:page.locator('input[name=action][value=refund]')});
  await refund.getByLabel('Сумма возврата').fill('200');await refund.getByLabel('Причина возврата').fill('Согласованная скидка');await save(refund);
  await expect(booking.locator('.amounts').getByText(/800/)).toHaveCount(2);
  await booking.getByText('Посадка и неявка',{exact:false}).click();await booking.getByRole('button',{name:'Посадка',exact:true}).click();await expect(booking.locator('.attendance-status.boarded')).toBeVisible();
@@ -23,7 +23,7 @@ test('возврат, расходы, завершение и полная вы�
   const form=addExpense.locator('form');await form.getByLabel('Сумма расхода').fill(amount);await form.getByLabel('Кто оплатил').selectOption(payer);await form.getByLabel('Описание расхода').fill(description);await save(form);
  }
  await expect(metric(page,'Расходы рейса')).toContainText('150');
- const trip=await openTrip(page,'Ош');await trip.getByText('Завершить рейс',{exact:true}).click();
+ const trip=await openTrip(page,'Ош');await openActions(trip,'Действия с рейсом');await trip.getByText('Завершить рейс',{exact:true}).click();
  const completion=trip.locator('form').filter({has:page.locator('input[name=action][value=completeTrip]')});
  // Completing the trip removes the form; assert the persisted status instead of old form state.
  await completion.getByRole('button',{name:'Сохранить',exact:true}).click();await expect(trip.locator('.trip-detail-header .status-pill')).toContainText('Завершён');await closeModal(page);

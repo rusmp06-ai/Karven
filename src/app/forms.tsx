@@ -1,9 +1,11 @@
 'use client';
-import { Children, cloneElement, isValidElement, useActionState, useEffect, useId, useRef, useState, startTransition, type ReactElement } from 'react';
+import { Children, cloneElement, isValidElement, useContext, useActionState, useEffect, useId, useRef, useState, startTransition, type ReactElement } from 'react';
 import { mutate, type ActionState } from './actions';
 import { useDemo } from './demo-context';
+import {ActionsMenuContext} from './actions-menu';
 export function SubmitForm({action,children,onSuccess,disabled=false,resetOnSuccess=true,submitLabel,pendingLabel,className}:{action:string;children?:React.ReactNode;onSuccess?:(state:ActionState)=>void;disabled?:boolean;resetOnSuccess?:boolean;submitLabel?:string;pendingLabel?:string;className?:string}) {
   const demo=useDemo();
+  const closeMenu=useContext(ActionsMenuContext);
   const [requestId,setRequestId]=useState('');
   const formRef=useRef<HTMLFormElement>(null);
   const [edited,setEdited]=useState(false);
@@ -11,7 +13,7 @@ export function SubmitForm({action,children,onSuccess,disabled=false,resetOnSucc
   const [state,submit,pending] = useActionState(async(previous:Parameters<typeof mutate>[0],form:FormData):Promise<ActionState>=>{
     if(!navigator.onLine)return {error:'Нет подключения к интернету. Восстановите соединение и повторите сохранение.'};
     const result=await mutate(previous,form);
-    if(result.success){setRequestId(crypto.randomUUID());onSuccess?.(result);}
+    if(result.success){closeMenu?.();setRequestId(crypto.randomUUID());onSuccess?.(result);}
     return result;
   },{});
   // Dispatch explicitly: a React form action also resets fields after validation

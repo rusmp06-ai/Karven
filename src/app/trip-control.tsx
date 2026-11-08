@@ -9,7 +9,7 @@ import {amount} from './dispatch';
 import {TaskForm,taskStatuses} from './customer-ui';
 function jump(id:string,summary?:string){
  const element=document.getElementById(id);if(!element)return;
- if(summary)for(const details of element.querySelectorAll('details'))if(details.querySelector('summary')?.textContent?.startsWith(summary))details.open=true;
+ if(summary)for(const details of element.querySelectorAll('details'))if(details.querySelector('summary')?.textContent?.startsWith(summary)){const popover=details.closest<HTMLElement>('[popover]');if(popover&&!popover.matches(':popover-open')){const trigger=popover.closest('.actions-menu')?.querySelector<HTMLButtonElement>('.actions-trigger');if(trigger)trigger.click();else popover.showPopover();}details.open=true;}
  element.scrollIntoView({behavior:'smooth',block:'start'});element.focus({preventScroll:true});
 }
 export function TripControl({trip,bookings,workspace,drivers,vehicles,actor,now}:{trip:TripView;bookings:BookingView[];workspace:CustomerWorkspace;drivers:Driver[];vehicles:Vehicle[];actor:Actor;now:number}){
