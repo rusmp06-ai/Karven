@@ -18,7 +18,7 @@ import { createFleet } from '@/lib/fleet';
 import { createFinance } from '@/lib/finance';
 import { createTripOperations } from '@/lib/trip-operations';
 import { createAuth, AuthError } from '@/lib/auth';
-export type ActionState = { error?: string; success?: string; createdId?:string; entity?:'trip'|'booking' };
+export type ActionState = { error?: string; success?: string; createdId?:string; entity?:'trip'|'booking'|'client' };
 export async function mutate(previous:ActionState,form:FormData):Promise<ActionState> {if(['backupRestore','telegramSave','telegramDisconnect','telegramTest'].includes(String(form.get('action'))))await waitForTelegramDelivery();return withWorkspace(()=>performMutation(previous,form));}
 async function performMutation(_:ActionState,form:FormData):Promise<ActionState> {
  const actor=await requireActor();
@@ -46,6 +46,7 @@ async function performMutation(_:ActionState,form:FormData):Promise<ActionState>
    case 'backupRestore':await createBackups(db,actor).restore(data);restored=true;break;
    case 'parkSettings':await createParkSettings(db,actor).savePark(data);break;
    case 'routeTemplate':await createParkSettings(db,actor).saveRoute(data);break;
+   case 'client':createdId=await createCustomerWorkspace(db,actor).addClient(data);entity='client';break;
    case 'clientNote':await createCustomerWorkspace(db,actor).addNote(data);break;
    case 'task':await createCustomerWorkspace(db,actor).saveTask(data);break;
    case 'transferBooking':await operations.transfer(data);break;

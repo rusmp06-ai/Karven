@@ -2,7 +2,7 @@
 import { Children, cloneElement, isValidElement, useActionState, useEffect, useId, useRef, useState, startTransition, type ReactElement } from 'react';
 import { mutate, type ActionState } from './actions';
 import { useDemo } from './demo-context';
-export function SubmitForm({action,children,onSuccess,disabled=false,resetOnSuccess=true,submitLabel,pendingLabel}:{action:string;children?:React.ReactNode;onSuccess?:(state:ActionState)=>void;disabled?:boolean;resetOnSuccess?:boolean;submitLabel?:string;pendingLabel?:string}) {
+export function SubmitForm({action,children,onSuccess,disabled=false,resetOnSuccess=true,submitLabel,pendingLabel,className}:{action:string;children?:React.ReactNode;onSuccess?:(state:ActionState)=>void;disabled?:boolean;resetOnSuccess?:boolean;submitLabel?:string;pendingLabel?:string;className?:string}) {
   const demo=useDemo();
   const [requestId,setRequestId]=useState('');
   const formRef=useRef<HTMLFormElement>(null);
@@ -17,7 +17,7 @@ export function SubmitForm({action,children,onSuccess,disabled=false,resetOnSucc
   // Dispatch explicitly: a React form action also resets fields after validation
   // errors returned as state. Here only a successful save resets the draft.
   useEffect(()=>{if(state.success&&resetOnSuccess)formRef.current?.reset()},[state,resetOnSuccess]);
-  return <form ref={formRef} onSubmit={event=>{
+  return <form className={className} ref={formRef} onSubmit={event=>{
     event.preventDefault();if(pending||!requestId||disabled||demo)return;
     const form=new FormData(event.currentTarget);setEdited(false);
     startTransition(()=>submit(form));

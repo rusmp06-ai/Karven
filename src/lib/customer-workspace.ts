@@ -5,6 +5,7 @@ import {requireRole,type Actor} from './access';
 import {BusinessError} from './crm';
 import {recordAudit} from './audit';
 import {once} from './idempotency';
+import {phoneInput} from './orders';
 export type Customer={id:string;name:string;phone:string};
 export type CustomerNote={id:string;client_id:string;body:string;author_name:string;created_at:string};
 export type CustomerMovement={id:string;client_id:string;booking_id:string;kind:'payment'|'refund';amount_minor:number;currency:string;method:string;created_at:string};
@@ -30,6 +31,17 @@ export function createCustomerWorkspace(db:Database,actor:Actor){
    const movements=movementResult.rows.map(n=>({...n,created_at:new Date(n.created_at).toISOString()}));
    const tasks=taskResult.rows.map(n=>({...n,due_at:new Date(n.due_at).toISOString()}));
    return {clients,notes,movements,tasks,assignees};
+  },
+  async addClient(raw:unknown){
+   access();const input=z.object({name:z.string().trim().min(1).max(120),phone:phoneInput,requestId:z.uuid()}).parse(raw);
+   return db.transaction(async tx=>{
+    await once(tx,actor,input.requestId,'client.create',input,async()=>{
+     const id=randomUUID();const inserted=await tx.query('INSERT INTO clients(id,name,phone) VALUES($1,$2,$3) ON CONFLICT(phone) DO NOTHING RETURNING id',[id,input.name,input.phone]);
+     if(!inserted.rows.length)throw new BusinessError('Клиент с этим телефоном уже существует. Найдите его в списке клиентов.');
+     await recordAudit(tx,actor,id,'client.created');
+    });
+    return (await tx.query<{id:string}>('SELECT id FROM clients WHERE phone=$1',[input.phone])).rows[0].id;
+   });
   },
   async addNote(raw:unknown){
    access();const input=z.object({clientId:z.uuid(),body:z.string().trim().min(1).max(2000),requestId:z.uuid()}).parse(raw);

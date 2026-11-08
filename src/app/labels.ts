@@ -2,7 +2,7 @@ export const auditLabels:Record<string,string>={
  'telegram.configured':'Изменено подключение Telegram','telegram.disconnected':'Удалено подключение Telegram','telegram.tested':'Проверено подключение Telegram','telegram.retried':'Повтор уведомления Telegram',
  'backup.imported':'Загружена резервная копия','backup.created':'Создана резервная копия','backup.verified':'Проверена резервная копия','backup.restored':'Восстановлены данные из копии',
  'park.updated':'Обновлены настройки парка','route.created':'Добавлен типовой маршрут','route.updated':'Обновлён типовой маршрут',
- 'client.note_added':'Добавлена заметка клиента','task.created':'Создана задача','task.updated':'Изменена задача',
+ 'client.created':'Добавлен клиент','client.note_added':'Добавлена заметка клиента','task.created':'Создана задача','task.updated':'Изменена задача',
  'trip.cancelled':'Отменён рейс','booking.transferred':'Перенесён заказ','booking.resized':'Изменено число пассажиров','passenger.attendance':'Отметка пассажира',
  'trip.completed':'Завершён рейс','booking.refunded':'Возвращены деньги пассажиру','expense.recorded':'Записан расход','expense.voided':'Аннулирован расход','settlement.approved':'Утверждён расчёт с водителем','driver.paid':'Записана выплата водителю',
  'trip.created':'Создан рейс','trip.assigned':'Назначены водитель и автомобиль',
