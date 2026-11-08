@@ -8,7 +8,8 @@ export function SubmitForm({action,children,onSuccess,disabled=false,resetOnSucc
   const formRef=useRef<HTMLFormElement>(null);
   const [edited,setEdited]=useState(false);
   useEffect(()=>setRequestId(crypto.randomUUID()),[]);
-  const [state,submit,pending] = useActionState(async(previous:Parameters<typeof mutate>[0],form:FormData)=>{
+  const [state,submit,pending] = useActionState(async(previous:Parameters<typeof mutate>[0],form:FormData):Promise<ActionState>=>{
+    if(!navigator.onLine)return {error:'Нет подключения к интернету. Восстановите соединение и повторите сохранение.'};
     const result=await mutate(previous,form);
     if(result.success){setRequestId(crypto.randomUUID());onSuccess?.(result);}
     return result;

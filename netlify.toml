@@ -13,3 +13,9 @@
 
 [functions."telegram-dispatch"]
   schedule = "*/5 * * * *"
+
+[[headers]]
+  for = "/sw.js"
+  [headers.values]
+    Cache-Control = "no-cache, no-store, must-revalidate"
+    Service-Worker-Allowed = "/"
