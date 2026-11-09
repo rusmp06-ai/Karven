@@ -1,3 +1,4 @@
+import {createCancellations} from '../src/lib/cancellations';
 import {beforeEach,afterEach,it,expect} from 'vitest';
 import {randomUUID} from 'node:crypto';
 import {PGlite} from '@electric-sql/pglite';
@@ -78,23 +79,23 @@ it('после посадки запрещает перенос, изменен�
  await assign();await db.query("UPDATE trips SET departure_at=now()+interval '30 minutes' WHERE id=$1",[source]);await ops.attendance(attendance());
  await expect(ops.transfer(move())).rejects.toThrow('отметки');
  await expect(ops.resize({bookingId,count:1,passengers:[{name:'Другой',phone:''}],childSeats:0,reason:'Изменение',requestId:key()})).rejects.toThrow('отметки');
- await expect(crm.cancelBooking(bookingId)).rejects.toThrow('отметки');await expect(finance.cancelWithRefund({bookingId,method:'cash',reason:'Отмена',requestId:key()})).rejects.toThrow('отметки');
+ await expect(crm.cancelBooking(bookingId)).rejects.toThrow('отметки');await expect(createCancellations(db,owner).cancel({bookingId,initiator:'client',reason:'Отмена',requestId:key()})).rejects.toThrow('отметки');
  await expect(ops.cancelTrip(cancel())).rejects.toThrow('отметки');
  const otherVehicle=await fleet.saveVehicle({plate:'OPS456',model:'Другой авто',capacity:4,ownerName:'Парк',kind:'park',status:'available'});await expect(fleet.assign({tripId:source,driverId,vehicleId:otherVehicle,endsAt:new Date(Date.now()+3*3600000).toISOString()})).rejects.toThrow('отметки');
 });
 it('отменяет рейс с возвратом остатка каждой оплаты, сохраняет расходы и идемпотентность',async()=>{
  const other=await booking(source);await crm.addPayment({bookingId,amount:'600',method:'cash'});await finance.refund({bookingId,amount:'100',method:'cash',reason:'Скидка',requestId:key()});
  await crm.addPayment({bookingId:other,amount:'300',method:'card'});await finance.addExpense({tripId:source,amount:'50',paidBy:'park',category:'fuel',description:'Заправка',requestId:key()});
- const input=cancel();await Promise.all([ops.cancelTrip(input),ops.cancelTrip(input)]);const data=await crm.dashboard();expect(data.trips.find(t=>t.id===source)).toMatchObject({status:'cancelled',occupied:0,cancel_reason:'Отмена отправления'});
+ const input=cancel();await Promise.all([ops.cancelTrip(input),ops.cancelTrip(input)]);await createCancellations(db,owner).returnMoney({bookingId,amount:'500',method:'cash',reference:'Клиент получил наличные',confirmed:'yes',requestId:key()});await createCancellations(db,owner).returnMoney({bookingId:other,amount:'300',method:'card',reference:'Перевод на карту клиента',confirmed:'yes',requestId:key()});const data=await crm.dashboard();expect(data.trips.find(t=>t.id===source)).toMatchObject({status:'cancelled',occupied:0,cancel_reason:'Отмена отправления'});
  expect(data.bookings.filter(b=>b.trip_id===source).every(b=>b.status==='cancelled'&&b.paid_minor===0&&b.total_minor===0)).toBe(true);
  expect((await db.query('SELECT * FROM refunds')).rows).toHaveLength(3);expect((await db.query('SELECT * FROM trip_expenses')).rows).toHaveLength(1);
  expect((await finance.report()).trips.find(t=>t.id===source)).toMatchObject({revenue_minor:0,cash_minor:-5000,result_minor:-5000});
  await expect(booking(source)).rejects.toThrow('закрыто');await expect(finance.completeTrip({tripId:source,requestId:key()})).rejects.toThrow('Отменённый');
 });
-it('диспетчер отменяет только неоплаченный рейс, ошибка не меняет данные',async()=>{
- const dispatcher=createTripOperations(db,{...owner,role:'dispatcher'});await crm.addPayment({bookingId,amount:'100',method:'cash'});await expect(dispatcher.cancelTrip(cancel())).rejects.toThrow('прав');
- expect((await crm.dashboard()).trips.find(t=>t.id===source)!.status).toBe('scheduled');expect((await db.query('SELECT * FROM refunds')).rows).toHaveLength(0);
- await dispatcher.cancelTrip(cancel(target));expect((await crm.dashboard()).trips.find(t=>t.id===target)!.status).toBe('cancelled');
+it('менеджер отменяет оплаченный рейс, создавая обязательство без выдачи денег',async()=>{
+ const dispatcher=createTripOperations(db,{...owner,role:'dispatcher'});await crm.addPayment({bookingId,amount:'100',method:'cash'});await dispatcher.cancelTrip(cancel());
+ expect((await crm.dashboard()).trips.find(t=>t.id===source)!.status).toBe('cancelled');expect((await db.query('SELECT * FROM refunds')).rows).toHaveLength(0);
+ expect((await db.query('SELECT return_due_minor FROM booking_cancellations WHERE booking_id=$1',[bookingId])).rows[0]).toMatchObject({return_due_minor:10000});
 });
 it('возмещает расходы водителя после отмены рейса и освобождает ресурсы',async()=>{
  await assign();await finance.addExpense({tripId:source,amount:'200',paidBy:'driver',category:'fuel',description:'Заправка',requestId:key()});await ops.cancelTrip(cancel());
@@ -107,5 +108,5 @@ it('водитель не управляет рейсами/составом, и
  expect((await createCrm(db,driver).dashboard()).bookings[0].history).toEqual([]);
 });
 it('миграция 5 сохраняет рейсы предыдущей версии и повторяется безопасно',async()=>{
- const old=new PGlite();try{await old.exec(schemaV1+migrationV2+migrationV3+migrationV4);await seedOwner(old);await old.exec(migrationV5);await old.exec(schema);expect((await old.query('SELECT * FROM users')).rows).toHaveLength(1);expect((await old.query('SELECT * FROM schema_migrations')).rows).toHaveLength(9);}finally{await old.close();}
+ const old=new PGlite();try{await old.exec(schemaV1+migrationV2+migrationV3+migrationV4);await seedOwner(old);await old.exec(migrationV5);await old.exec(schema);expect((await old.query('SELECT * FROM users')).rows).toHaveLength(1);expect((await old.query('SELECT * FROM schema_migrations')).rows).toHaveLength(10);}finally{await old.close();}
 });

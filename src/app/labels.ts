@@ -1,4 +1,5 @@
 export const auditLabels:Record<string,string>={
+ 'shift.opened':'Открыта смена','shift.closed':'Закрыта смена','cash.transfer_requested':'Предложена передача наличных','cash.transfer_accepted':'Принята передача наличных','cash.transfer_rejected':'Отклонена передача наличных','cash.adjusted':'Внесена корректировка кассы','organization.updated':'Изменены реквизиты','report.created':'Сформирован отчёт','report.queued':'Отчёт поставлен на отправку','session.ended':'Выход из приложения',
  'telegram.configured':'Изменено подключение Telegram','telegram.disconnected':'Удалено подключение Telegram','telegram.tested':'Проверено подключение Telegram','telegram.retried':'Повтор уведомления Telegram',
  'backup.imported':'Загружена резервная копия','backup.created':'Создана резервная копия','backup.verified':'Проверена резервная копия','backup.restored':'Восстановлены данные из копии',
  'park.updated':'Обновлены настройки парка','route.created':'Добавлен типовой маршрут','route.updated':'Обновлён типовой маршрут',

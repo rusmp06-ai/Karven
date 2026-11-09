@@ -4,6 +4,8 @@ import { z } from 'zod';
 import { type Actor, requireRole } from './access';
 import { recordAudit, type Tx } from './audit';
 import { BusinessError, toMinor } from './crm';
+import {activeShift} from './cash-shifts';
+import {queueNotification} from './notification-events';
 import { once } from './idempotency';
 const uuid=z.string().uuid();
 const amount=z.string().regex(/^\d{1,7}(\.\d{1,2})?$/,'Введите сумму с точностью до двух знаков');
@@ -36,7 +38,7 @@ export function createFinance(db:Database,actor:Actor) {
    }));
   },
   async refund(raw:unknown) {
-   requireRole(actor,'owner');
+   requireRole(actor,'owner','dispatcher');
    const input=z.object({bookingId:uuid,amount,reason,method,requestId}).parse(raw);
    const value=toMinor(input.amount);
    if(value<=0)throw new BusinessError('Сумма возврата должна быть больше нуля');
@@ -45,55 +47,37 @@ export function createFinance(db:Database,actor:Actor) {
     if(!booking||booking.status!=='confirmed')throw new BusinessError('Активная бронь не найдена');
     const net=(await tx.query<{amount:number}>('SELECT ((SELECT COALESCE(SUM(amount_minor),0) FROM payments WHERE booking_id=$1)-(SELECT COALESCE(SUM(amount_minor),0) FROM refunds WHERE booking_id=$1))::integer AS amount',[input.bookingId])).rows[0].amount;
     if(value>net)throw new BusinessError('Возврат превышает полученную сумму за вычетом прошлых возвратов');
-    await tx.query('INSERT INTO refunds(id,booking_id,amount_minor,method,reason,created_by) VALUES($1,$2,$3,$4,$5,$6)',[randomUUID(),input.bookingId,value,input.method,input.reason,actor.id]);
-    await recordAudit(tx,actor,input.bookingId,'booking.refunded',{amountMinor:value,method:input.method,reason:input.reason});
-   }));
-  },
-  async cancelWithRefund(raw:unknown) {
-   requireRole(actor,'owner');
-   const input=z.object({bookingId:uuid,reason,method,requestId}).parse(raw);
-   await db.transaction(tx=>once(tx,actor,input.requestId,'booking.cancel_refund',input,async()=>{
-    const booking=(await tx.query<{trip_id:string;status:string}>('SELECT trip_id,status FROM bookings WHERE id=$1 FOR UPDATE',[input.bookingId])).rows[0];
-    if(!booking)throw new BusinessError('Бронь не найдена');
-    if(booking.status==='cancelled')return;
-    const trip=await tripLock(tx,booking.trip_id);
-    if(trip.status==='completed')throw new BusinessError('Нельзя отменить бронь завершённого рейса. Для уменьшения стоимости оформите частичный возврат.');
-    if((await tx.query('SELECT position FROM passenger_attendance WHERE booking_id=$1 LIMIT 1',[input.bookingId])).rows.length)throw new BusinessError('Сначала исправьте отметки пассажиров перед отменой');
-    const net=(await tx.query<{amount:number}>('SELECT ((SELECT COALESCE(SUM(amount_minor),0) FROM payments WHERE booking_id=$1)-(SELECT COALESCE(SUM(amount_minor),0) FROM refunds WHERE booking_id=$1))::integer AS amount',[input.bookingId])).rows[0].amount;
-    if(net>0) {
-     await tx.query('INSERT INTO refunds(id,booking_id,amount_minor,method,reason,created_by) VALUES($1,$2,$3,$4,$5,$6)',[randomUUID(),input.bookingId,net,input.method,input.reason,actor.id]);
-     await recordAudit(tx,actor,input.bookingId,'booking.refunded',{amountMinor:net,method:input.method,reason:input.reason});
-    }
-    await tx.query("UPDATE bookings SET status='cancelled' WHERE id=$1",[input.bookingId]);
-    await recordAudit(tx,actor,input.bookingId,'booking.cancelled',{refundMinor:net,reason:input.reason});
+    const shift=await activeShift(tx,actor,input.method==='cash'),refundId=randomUUID();await tx.query('INSERT INTO refunds(id,booking_id,amount_minor,method,reason,created_by,shift_id) VALUES($1,$2,$3,$4,$5,$6,$7)',[refundId,input.bookingId,value,input.method,input.reason,actor.id,shift]);
+    await tx.query('UPDATE bookings SET version=version+1 WHERE id=$1',[input.bookingId]);const details={refundId,amountMinor:value,method:input.method,reason:input.reason,manager:actor.name};await recordAudit(tx,actor,input.bookingId,'booking.refunded',details);await queueNotification(tx,`${input.requestId}:refund`,'booking.refunded',input.bookingId,details);
    }));
   },
   async addExpense(raw:unknown) {
    requireRole(actor,'owner','dispatcher');
-   const input=z.object({tripId:uuid,amount,category:z.enum(['fuel','toll','parking','other']),paidBy:z.enum(['park','driver']),description:reason,requestId}).parse(raw);
+   const input=z.object({tripId:uuid,amount,category:z.enum(['fuel','toll','parking','other']),paidBy:z.enum(['park','driver']),description:reason,method:z.enum(['cash','transfer','card','unknown']).default('unknown'),documentReference:z.string().trim().max(200).default(''),requestId}).parse(raw);
    const value=toMinor(input.amount);if(value<=0)throw new BusinessError('Расход должен быть больше нуля');
    await db.transaction(tx=>once(tx,actor,input.requestId,'expense.add',input,async()=>{
     const trip=await tripLock(tx,input.tripId);await unlockedExpenses(tx,input.tripId);
     if(input.paidBy==='driver'&&!trip.driver_id)throw new BusinessError('Сначала назначьте водителя');
-    const id=randomUUID();
-    await tx.query('INSERT INTO trip_expenses(id,trip_id,amount_minor,category,paid_by,description,created_by) VALUES($1,$2,$3,$4,$5,$6,$7)',[id,input.tripId,value,input.category,input.paidBy,input.description,actor.id]);
+    if(actor.role==='dispatcher'&&input.method==='unknown')throw new BusinessError('Укажите способ оплаты расхода');const shift=await activeShift(tx,actor,input.paidBy==='park'&&input.method==='cash');const id=randomUUID();
+    await tx.query('INSERT INTO trip_expenses(id,trip_id,amount_minor,category,paid_by,description,created_by,method,document_reference,shift_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',[id,input.tripId,value,input.category,input.paidBy,input.description,actor.id,input.method,input.documentReference,shift]);
     await recordAudit(tx,actor,input.tripId,'expense.recorded',{expenseId:id,amountMinor:value,paidBy:input.paidBy,category:input.category});
    }));
   },
   async voidExpense(raw:unknown) {
-   requireRole(actor,'owner');
+   requireRole(actor,'owner','dispatcher');
    const input=z.object({expenseId:uuid,reason,requestId}).parse(raw);
    await db.transaction(tx=>once(tx,actor,input.requestId,'expense.void',input,async()=>{
-    const expense=(await tx.query<{trip_id:string;voided_at:Date|null}>('SELECT trip_id,voided_at FROM trip_expenses WHERE id=$1 FOR UPDATE',[input.expenseId])).rows[0];
+    const expense=(await tx.query<{trip_id:string;voided_at:Date|null;shift_id:string|null}>('SELECT trip_id,voided_at,shift_id FROM trip_expenses WHERE id=$1 FOR UPDATE',[input.expenseId])).rows[0];
     if(!expense)throw new BusinessError('Расход не найден');
     if(expense.voided_at)return;
+    if(expense.shift_id&&(await tx.query('SELECT id FROM work_shifts WHERE id=$1 AND closed_at IS NOT NULL',[expense.shift_id])).rows.length)throw new BusinessError('Расход относится к закрытой смене. Оформите отдельную корректировку с основанием');
     await tripLock(tx,expense.trip_id);await unlockedExpenses(tx,expense.trip_id);
     await tx.query('UPDATE trip_expenses SET voided_at=now(),void_reason=$2 WHERE id=$1',[input.expenseId,input.reason]);
     await recordAudit(tx,actor,expense.trip_id,'expense.voided',{expenseId:input.expenseId,reason:input.reason});
    }));
   },
   async approveSettlement(raw:unknown) {
-   requireRole(actor,'owner');
+   requireRole(actor,'owner','dispatcher');
    const input=z.object({tripId:uuid,fee:amount,note:reason,requestId}).parse(raw);
    const fee=toMinor(input.fee);
    await db.transaction(tx=>once(tx,actor,input.requestId,'settlement.approve',input,async()=>{
@@ -106,7 +90,7 @@ export function createFinance(db:Database,actor:Actor) {
    }));
   },
   async payDriver(raw:unknown) {
-   requireRole(actor,'owner');
+   requireRole(actor,'owner','dispatcher');
    const input=z.object({tripId:uuid,amount,method,requestId}).parse(raw);
    const value=toMinor(input.amount);if(value<=0)throw new BusinessError('Выплата должна быть больше нуля');
    await db.transaction(tx=>once(tx,actor,input.requestId,'driver.payout',input,async()=>{
@@ -114,7 +98,7 @@ export function createFinance(db:Database,actor:Actor) {
     if(!settlement)throw new BusinessError('Сначала утвердите расчёт с водителем');
     const paid=Number((await tx.query<{amount:string}>('SELECT COALESCE(SUM(amount_minor),0) AS amount FROM driver_payouts WHERE trip_id=$1',[input.tripId])).rows[0].amount);
     if(value>settlement.fee_minor+Number(settlement.reimbursement_minor)-paid)throw new BusinessError('Выплата превышает остаток расчёта с водителем');
-    await tx.query('INSERT INTO driver_payouts(id,trip_id,amount_minor,method,created_by) VALUES($1,$2,$3,$4,$5)',[randomUUID(),input.tripId,value,input.method,actor.id]);
+    const shift=await activeShift(tx,actor,input.method==='cash');await tx.query('INSERT INTO driver_payouts(id,trip_id,amount_minor,method,created_by,shift_id) VALUES($1,$2,$3,$4,$5,$6)',[randomUUID(),input.tripId,value,input.method,actor.id,shift]);
     await recordAudit(tx,actor,input.tripId,'driver.paid',{amountMinor:value,method:input.method});
    }));
   },
@@ -128,9 +112,9 @@ export function createFinance(db:Database,actor:Actor) {
     s.fee_minor, s.reimbursement_minor::float8, s.note AS settlement_note, s.approved_at,
     COALESCE(o.amount,0)::float8 AS paid_driver_minor,
     (COALESCE(p.amount,0)-COALESCE(r.amount,0)-COALESCE(e.park_amount,0)-COALESCE(o.amount,0))::float8 AS cash_minor,
-    CASE WHEN s.trip_id IS NULL AND t.status='cancelled' AND t.driver_id IS NULL THEN -COALESCE(e.amount,0)::float8 WHEN s.trip_id IS NULL THEN NULL ELSE (COALESCE(b.revenue,0)-COALESCE(e.amount,0)-s.fee_minor)::float8 END AS result_minor
+    CASE WHEN s.trip_id IS NULL AND t.status='cancelled' AND t.driver_id IS NULL THEN (COALESCE(b.revenue,0)-COALESCE(e.amount,0))::float8 WHEN s.trip_id IS NULL THEN NULL ELSE (COALESCE(b.revenue,0)-COALESCE(e.amount,0)-s.fee_minor)::float8 END AS result_minor
     FROM trips t LEFT JOIN drivers d ON d.id=t.driver_id
-    LEFT JOIN (SELECT b.trip_id,SUM(b.total_minor-COALESCE(r.amount,0)) AS revenue FROM bookings b LEFT JOIN (SELECT booking_id,SUM(amount_minor) AS amount FROM refunds GROUP BY booking_id) r ON r.booking_id=b.id WHERE b.status='confirmed' GROUP BY b.trip_id) b ON b.trip_id=t.id
+    LEFT JOIN (SELECT b.trip_id,SUM(CASE WHEN b.status='cancelled' THEN COALESCE(c.retained_minor,0) ELSE b.total_minor-COALESCE(r.amount,0) END) AS revenue FROM bookings b LEFT JOIN (SELECT booking_id,SUM(amount_minor) AS amount FROM refunds GROUP BY booking_id) r ON r.booking_id=b.id LEFT JOIN booking_cancellations c ON c.booking_id=b.id GROUP BY b.trip_id) b ON b.trip_id=t.id
     LEFT JOIN (SELECT b.trip_id,SUM(p.amount_minor) AS amount FROM payments p JOIN bookings b ON b.id=p.booking_id GROUP BY b.trip_id) p ON p.trip_id=t.id
     LEFT JOIN (SELECT b.trip_id,SUM(r.amount_minor) AS amount FROM refunds r JOIN bookings b ON b.id=r.booking_id GROUP BY b.trip_id) r ON r.trip_id=t.id
     LEFT JOIN (SELECT trip_id,SUM(amount_minor) AS amount,SUM(amount_minor) FILTER(WHERE paid_by='driver') AS driver_amount,SUM(amount_minor) FILTER(WHERE paid_by='park') AS park_amount FROM trip_expenses WHERE voided_at IS NULL GROUP BY trip_id) e ON e.trip_id=t.id

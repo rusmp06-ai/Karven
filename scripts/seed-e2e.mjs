@@ -1,5 +1,7 @@
 // Deterministic past-departure fixture, only in Playwright's isolated temporary database.
 import { PGlite } from '@electric-sql/pglite';
+import {randomBytes,scryptSync} from 'node:crypto';
+const hashPassword=password=>{const salt=randomBytes(16).toString('hex');return `scrypt:${salt}:${scryptSync(password,salt,64).toString('hex')}`;};
 import { schema } from '../src/lib/schema.ts';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
@@ -28,4 +30,5 @@ try {
  INSERT INTO bookings(id,trip_id,client_id,seats,total_minor,passenger_count,contact_name,contact_phone,passengers) VALUES('dddddddd-0000-4000-8000-000000000005','dddddddd-0000-4000-8000-000000000003','dddddddd-0000-4000-8000-000000000004',2,150000,2,'Пассажиры в пути','996555000012','[{"name":"Пассажир посадки","phone":""},{"name":"Пассажир неявки","phone":""}]'::jsonb);
  INSERT INTO payments(id,booking_id,amount_minor,method) VALUES('eeeeeeee-0000-4000-8000-000000000006','eeeeeeee-0000-4000-8000-000000000005',100000,'cash');
  `);
+ await db.query("INSERT INTO users(id,name,username,password_hash,role) VALUES($1,'Владелец теста','e2e-owner',$2,'owner'),($3,'Менеджер теста','e2e-manager',$4,'dispatcher')",['aaaaaaaa-0000-4000-8000-000000000001',await hashPassword('e2e-owner-password-1234'),'aaaaaaaa-0000-4000-8000-000000000002',await hashPassword('e2e-manager-password-1234')]);
 }finally{await db.close();}

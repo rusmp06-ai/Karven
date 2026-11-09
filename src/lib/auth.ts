@@ -39,10 +39,12 @@ export async function bootstrapOwner(db:Database) {
 }
 export function createAuth(db:Database) {
  return {
-  async login(raw:unknown) {
+  async login(raw:unknown,source='unattributed') {
    const input=z.object({username:loginName,password:z.string().min(1).max(128)}).parse(raw);
    // Serializing the check and increment prevents parallel requests bypassing the limit.
    return db.transaction(async tx=>{
+    await tx.exec("DELETE FROM login_attempts WHERE username IN(SELECT username FROM login_attempts WHERE window_start<now()-interval '1 day' LIMIT 500);DELETE FROM auth_rate_windows WHERE bucket IN(SELECT bucket FROM auth_rate_windows WHERE window_start<now()-interval '1 day' LIMIT 500)");
+    for(const [bucket,seconds,maximum] of [['global',300,500],[`source:${hashToken(source.slice(0,500))}`,900,120]] as const){const n=(await tx.query<{attempts:number}>(`INSERT INTO auth_rate_windows(bucket,attempts) VALUES($1,1) ON CONFLICT(bucket) DO UPDATE SET attempts=CASE WHEN auth_rate_windows.window_start<now()-($2::integer*interval '1 second') THEN 1 ELSE auth_rate_windows.attempts+1 END,window_start=CASE WHEN auth_rate_windows.window_start<now()-($2::integer*interval '1 second') THEN now() ELSE auth_rate_windows.window_start END RETURNING attempts`,[bucket,seconds])).rows[0].attempts;if(n>maximum)return null;}
     const [attemptResult,userResult]=await Promise.all([
      tx.query<{failures:number;window_start:Date}>("INSERT INTO login_attempts(username) VALUES($1) ON CONFLICT(username) DO UPDATE SET username=EXCLUDED.username RETURNING failures,window_start",[input.username]),
      tx.query<Actor & {password_hash:string;active:boolean}>('SELECT * FROM users WHERE username=$1',[input.username]),
@@ -75,7 +77,7 @@ export function createAuth(db:Database) {
    return rows[0]??null;
   },
   async logout(token:string|undefined) {
-   if(token)await db.query('DELETE FROM sessions WHERE token_hash=$1',[hashToken(token)]);
+   if(token)await db.transaction(async tx=>{const user=(await tx.query<Actor>('SELECT u.id,u.name,u.username,u.role,u.driver_id FROM users u JOIN sessions s ON s.user_id=u.id WHERE s.token_hash=$1',[hashToken(token)])).rows[0];await tx.query('DELETE FROM sessions WHERE token_hash=$1',[hashToken(token)]);if(user)await recordAudit(tx,user,user.id,'session.ended');});
   },
   async createUser(actor:Actor,raw:unknown) {
    requireRole(actor,'owner');
@@ -100,7 +102,7 @@ export function createAuth(db:Database) {
    await db.transaction(async tx=>{
     if(!(await tx.query('SELECT id FROM users WHERE id=$1 FOR UPDATE',[id])).rows.length)throw new AuthError('Сотрудник не найден');
     await tx.query('UPDATE users SET active=$2 WHERE id=$1',[id,active]);
-    if(!active)await tx.query('DELETE FROM sessions WHERE user_id=$1',[id]);
+    if(!active){await tx.query('DELETE FROM sessions WHERE user_id=$1',[id]);const transfers=(await tx.query<{id:string}>("UPDATE cash_transfers SET status='rejected',decided_at=now(),decided_by=$2 WHERE status='pending' AND (from_shift_id IN(SELECT id FROM work_shifts WHERE user_id=$1) OR to_shift_id IN(SELECT id FROM work_shifts WHERE user_id=$1)) RETURNING id",[id,actor.id])).rows;for(const transfer of transfers)await recordAudit(tx,actor,transfer.id,'cash.transfer_rejected',{reason:'Учётная запись участника заблокирована',userId:id});}
     await recordAudit(tx,actor,id,active?'user.enabled':'user.disabled');
    });
   },

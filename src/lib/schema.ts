@@ -193,4 +193,51 @@ IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=9) THEN
 END IF;
 END $$;
 `;
-export const schema = schemaV1 + migrationV2 + migrationV3 + migrationV4 + migrationV5 + migrationV6 + migrationV7 + migrationV8 + migrationV9;
+export const migrationV10 = `
+DO $$ BEGIN
+IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=10) THEN
+ ALTER TABLE bookings ADD COLUMN version integer NOT NULL DEFAULT 1 CHECK(version>0);
+ CREATE TABLE booking_cancellations(
+  booking_id uuid PRIMARY KEY REFERENCES bookings(id),initiator text NOT NULL CHECK(initiator IN ('client','park','legacy')),
+  reason text NOT NULL CHECK(length(reason) BETWEEN 3 AND 1000),retention_reason text NOT NULL DEFAULT '',
+  paid_at_cancel_minor integer NOT NULL CHECK(paid_at_cancel_minor>=0),retained_minor integer NOT NULL CHECK(retained_minor>=0),return_due_minor integer NOT NULL CHECK(return_due_minor>=0),
+  created_by uuid REFERENCES users(id),created_at timestamptz NOT NULL DEFAULT now(),legacy boolean NOT NULL DEFAULT false,
+  CHECK(retained_minor+return_due_minor=paid_at_cancel_minor),CHECK(initiator<>'park' OR retained_minor=0),CHECK(retained_minor=0 OR length(retention_reason)>=3)
+ );
+ INSERT INTO booking_cancellations(booking_id,initiator,reason,paid_at_cancel_minor,retained_minor,return_due_minor,created_by,created_at,legacy)
+ SELECT b.id,'legacy',COALESCE(NULLIF(h.details->>'reason',''),'Историческая отмена: причина не сохранена'),0,0,0,h.actor_id,COALESCE(h.created_at,b.created_at),true
+ FROM bookings b LEFT JOIN LATERAL(SELECT details,actor_id,created_at FROM audit_events WHERE entity_id=b.id AND action='booking.cancelled' ORDER BY created_at DESC LIMIT 1) h ON true WHERE b.status='cancelled';
+ CREATE TABLE work_shifts(id uuid PRIMARY KEY,user_id uuid NOT NULL REFERENCES users(id),opened_at timestamptz NOT NULL DEFAULT now(),closed_at timestamptz,close_note text NOT NULL DEFAULT '');
+ CREATE UNIQUE INDEX work_shifts_one_open ON work_shifts(user_id) WHERE closed_at IS NULL;
+ CREATE TABLE shift_balances(shift_id uuid NOT NULL REFERENCES work_shifts(id),currency text NOT NULL CHECK(currency~'^[A-Z]{3}$'),opening_minor bigint NOT NULL DEFAULT 0,expected_minor bigint,declared_minor bigint,CHECK(declared_minor IS NULL OR declared_minor>=0),PRIMARY KEY(shift_id,currency));
+ CREATE TABLE cash_transfers(id uuid PRIMARY KEY,from_shift_id uuid NOT NULL REFERENCES work_shifts(id),to_shift_id uuid NOT NULL REFERENCES work_shifts(id),currency text NOT NULL CHECK(currency~'^[A-Z]{3}$'),amount_minor integer NOT NULL CHECK(amount_minor>0),status text NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','accepted','rejected')),reason text NOT NULL CHECK(length(reason)>=3),created_at timestamptz NOT NULL DEFAULT now(),decided_at timestamptz,decided_by uuid REFERENCES users(id),CHECK(from_shift_id<>to_shift_id));
+ ALTER TABLE payments ADD COLUMN created_by uuid REFERENCES users(id);
+ ALTER TABLE payments ADD COLUMN shift_id uuid REFERENCES work_shifts(id);
+ ALTER TABLE refunds ADD COLUMN shift_id uuid REFERENCES work_shifts(id);
+ ALTER TABLE refunds ADD COLUMN cancellation_booking_id uuid REFERENCES booking_cancellations(booking_id);
+ ALTER TABLE trip_expenses ADD COLUMN shift_id uuid REFERENCES work_shifts(id);
+ ALTER TABLE trip_expenses ADD COLUMN method text NOT NULL DEFAULT 'unknown' CHECK(method IN ('cash','transfer','card','unknown'));
+ ALTER TABLE trip_expenses ADD COLUMN document_reference text NOT NULL DEFAULT '';
+ ALTER TABLE driver_payouts ADD COLUMN shift_id uuid REFERENCES work_shifts(id);
+ CREATE TABLE organization_settings(id integer PRIMARY KEY CHECK(id=1),legal_name text NOT NULL DEFAULT '',tax_id text NOT NULL DEFAULT '',registration_number text NOT NULL DEFAULT '',address text NOT NULL DEFAULT '',country text NOT NULL DEFAULT '',tax_regime text NOT NULL DEFAULT '',business_model text NOT NULL DEFAULT 'unspecified' CHECK(business_model IN ('carrier','agent','unspecified')),version integer NOT NULL DEFAULT 1);
+ INSERT INTO organization_settings(id) VALUES(1);
+ CREATE TABLE report_documents(id uuid PRIMARY KEY,created_by uuid NOT NULL REFERENCES users(id),created_at timestamptz NOT NULL DEFAULT now(),period_from date NOT NULL,period_to date NOT NULL,CHECK(period_from<=period_to),payload jsonb NOT NULL CHECK(jsonb_typeof(payload)='object'),sha256 text NOT NULL CHECK(length(sha256)=64),previous_id uuid);
+ CREATE TABLE telegram_events(id uuid PRIMARY KEY,event_key text NOT NULL UNIQUE,kind text NOT NULL CHECK(kind IN ('booking.cancelled','booking.refunded','trip.cancelled','report.document')),entity_id uuid NOT NULL,settings_version integer NOT NULL,payload jsonb NOT NULL CHECK(jsonb_typeof(payload)='object'),status text NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','sending','sent','failed','unknown','cancelled')),attempts integer NOT NULL DEFAULT 0,last_error text,created_at timestamptz NOT NULL DEFAULT now(),next_attempt_at timestamptz NOT NULL DEFAULT now(),sent_at timestamptz);
+ CREATE INDEX telegram_events_pending ON telegram_events(status,next_attempt_at);
+ CREATE TABLE cash_adjustments(id uuid PRIMARY KEY,shift_id uuid NOT NULL REFERENCES work_shifts(id),currency text NOT NULL CHECK(currency~'^[A-Z]{3}$'),amount_minor integer NOT NULL CHECK(amount_minor<>0),reason text NOT NULL CHECK(length(reason)>=10),document_reference text NOT NULL,created_by uuid NOT NULL REFERENCES users(id),created_at timestamptz NOT NULL DEFAULT now());
+ CREATE TABLE auth_rate_windows(bucket text PRIMARY KEY,window_start timestamptz NOT NULL DEFAULT now(),attempts integer NOT NULL DEFAULT 0);
+ CREATE SCHEMA IF NOT EXISTS karven_archive;
+ CREATE TABLE IF NOT EXISTS karven_archive.event_log(id uuid PRIMARY KEY,entity_id uuid NOT NULL,action text NOT NULL,details jsonb NOT NULL,actor_id uuid,actor_name text,created_at timestamptz NOT NULL,archived_at timestamptz NOT NULL DEFAULT now());
+ ALTER TABLE karven_archive.event_log ENABLE ROW LEVEL SECURITY;
+ INSERT INTO karven_archive.event_log(id,entity_id,action,details,actor_id,actor_name,created_at) SELECT a.id,a.entity_id,a.action,a.details,a.actor_id,u.name,a.created_at FROM audit_events a LEFT JOIN users u ON u.id=a.actor_id ON CONFLICT(id) DO NOTHING;
+ EXECUTE format('CREATE OR REPLACE FUNCTION karven_archive.preserve_event() RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog AS $body$ BEGIN INSERT INTO karven_archive.event_log(id,entity_id,action,details,actor_id,actor_name,created_at) VALUES(NEW.id,NEW.entity_id,NEW.action,NEW.details,NEW.actor_id,(SELECT name FROM %I.users WHERE id=NEW.actor_id),NEW.created_at) ON CONFLICT(id) DO NOTHING;RETURN NEW;END $body$',current_schema());
+ CREATE TABLE IF NOT EXISTS karven_archive.report_documents(id uuid PRIMARY KEY,created_at timestamptz NOT NULL,payload jsonb NOT NULL,sha256 text NOT NULL);
+ ALTER TABLE karven_archive.report_documents ENABLE ROW LEVEL SECURITY;
+ EXECUTE $fn$ CREATE OR REPLACE FUNCTION karven_archive.preserve_document() RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog AS $body$ BEGIN INSERT INTO karven_archive.report_documents(id,created_at,payload,sha256) VALUES(NEW.id,NEW.created_at,NEW.payload,NEW.sha256) ON CONFLICT(id) DO NOTHING;RETURN NEW;END $body$ $fn$;
+ CREATE TRIGGER preserve_report_document AFTER INSERT ON report_documents FOR EACH ROW EXECUTE FUNCTION karven_archive.preserve_document();
+ CREATE TRIGGER preserve_audit_event AFTER INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION karven_archive.preserve_event();
+ INSERT INTO schema_migrations(version) VALUES(10);
+END IF;
+END $$;
+`;
+export const schema = schemaV1 + migrationV2 + migrationV3 + migrationV4 + migrationV5 + migrationV6 + migrationV7 + migrationV8 + migrationV9 + migrationV10;

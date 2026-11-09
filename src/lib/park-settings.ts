@@ -13,12 +13,12 @@ export function createParkSettings(db:Database,actor:Actor){return {
  async list():Promise<ParkConfig>{
   requireRole(actor,'owner','dispatcher','driver');
   const parkRead=db.query<ParkSettings>('SELECT name,default_currency,version FROM park_settings WHERE id=$1',[settingsId]);
-  const routesRead=actor.role==='driver'?Promise.resolve({rows:[] as RouteTemplate[]}):db.query<RouteTemplate>('SELECT id,origin,destination,currency,capacity,duration_minutes,seat_minor,vehicle_minor,active,version FROM route_templates WHERE ($1::boolean OR active) ORDER BY origin,destination,currency,id',[actor.role==='owner']);
+  const routesRead=actor.role==='driver'?Promise.resolve({rows:[] as RouteTemplate[]}):db.query<RouteTemplate>('SELECT id,origin,destination,currency,capacity,duration_minutes,seat_minor,vehicle_minor,active,version FROM route_templates WHERE ($1::boolean OR active) ORDER BY origin,destination,currency,id',[true]);
   const [parkResult,routeResult]=await Promise.all([parkRead,routesRead]);
   return {park:parkResult.rows[0],routes:routeResult.rows};
  },
  async savePark(raw:unknown){
-  requireRole(actor,'owner');const input=z.object({name:z.string().trim().min(1).max(80),defaultCurrency:z.enum(parkCurrencies),version:z.coerce.number().int().min(1),requestId:z.uuid()}).parse(raw);
+  requireRole(actor,'owner','dispatcher');const input=z.object({name:z.string().trim().min(1).max(80),defaultCurrency:z.enum(parkCurrencies),version:z.coerce.number().int().min(1),requestId:z.uuid()}).parse(raw);
   await db.transaction(tx=>once(tx,actor,input.requestId,'park.settings',input,async()=>{
    const current=(await tx.query<{version:number}>('SELECT version FROM park_settings WHERE id=$1 FOR UPDATE',[settingsId])).rows[0];
    if(current.version!==input.version)throw new BusinessError('Настройки уже изменены. Обновите страницу.');
@@ -27,7 +27,7 @@ export function createParkSettings(db:Database,actor:Actor){return {
   }));
  },
  async saveRoute(raw:unknown){
-  requireRole(actor,'owner');const input=z.object({id:z.union([z.uuid(),z.literal('')]).default(''),version:z.coerce.number().int().min(1).default(1),origin:text,destination:text,currency:z.enum(parkCurrencies),capacity:z.coerce.number().int().min(1).max(60),durationMinutes:z.coerce.number().int().min(15).max(10080),seatPrice:price,vehiclePrice:price,active:z.enum(['true','false']).default('true'),requestId:z.uuid()}).parse(raw);
+  requireRole(actor,'owner','dispatcher');const input=z.object({id:z.union([z.uuid(),z.literal('')]).default(''),version:z.coerce.number().int().min(1).default(1),origin:text,destination:text,currency:z.enum(parkCurrencies),capacity:z.coerce.number().int().min(1).max(60),durationMinutes:z.coerce.number().int().min(15).max(10080),seatPrice:price,vehiclePrice:price,active:z.enum(['true','false']).default('true'),requestId:z.uuid()}).parse(raw);
   if(input.origin.toLowerCase()===input.destination.toLowerCase())throw new BusinessError('Пункты отправления и назначения должны отличаться');
   await db.transaction(tx=>once(tx,actor,input.requestId,'route.save',input,async()=>{
    const duplicate=(await tx.query('SELECT id FROM route_templates WHERE lower(origin)=lower($1) AND lower(destination)=lower($2) AND currency=$3 AND ($4::uuid IS NULL OR id<>$4::uuid)',[input.origin,input.destination,input.currency,input.id||null])).rows;

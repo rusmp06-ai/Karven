@@ -40,7 +40,7 @@ it('HTTP-ответы Telegram классифицируются без сохр�
  vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:false,status:401,json:async()=>({ok:false,error_code:401,description:token})}));expect(await sendTelegram(token,chatId,'test')).toEqual({status:'failed',error:'Telegram отклонил токен бота'});vi.stubGlobal('fetch',vi.fn().mockRejectedValue(new Error(token)));expect(JSON.stringify(await sendTelegram(token,chatId,'test'))).not.toContain(token);
 });
 it('уведомляет о регистрации даже при быстрой отмене, сохраняя первоначальные суммы',async()=>{
- await createTelegram(db,owner).save(config());const id=await createCrm(db,owner).createBooking(booking());const {createFinance}=await import('../src/lib/finance');await createFinance(db,owner).cancelWithRefund({bookingId:id,reason:'Клиент отменил поездку',method:'cash',requestId:randomUUID()});const send=vi.fn<TelegramTransport>().mockResolvedValue({status:'sent'});await deliverNextTelegram(db,send);expect(send.mock.calls[0][2]).toContain('Стоимость: 1500.00 KGS');expect(send.mock.calls[0][2]).toContain('бронь уже отменена');
+ await createTelegram(db,owner).save(config());const id=await createCrm(db,owner).createBooking(booking());const {createCancellations}=await import('../src/lib/cancellations');await createCancellations(db,owner).cancel({bookingId:id,initiator:'client',reason:'Клиент отменил поездку',requestId:randomUUID()});const send=vi.fn<TelegramTransport>().mockResolvedValue({status:'sent'});await deliverNextTelegram(db,send);expect(send.mock.calls[0][2]).toContain('Стоимость: 1500.00 KGS');expect(send.mock.calls[0][2]).toContain('бронь уже отменена');
 });
 
 it('serverless использует постоянный ключ среды без локального файла и сохраняет расшифровку в следующем вызове',async()=>{

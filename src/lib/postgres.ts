@@ -132,9 +132,9 @@ export async function migratePostgres(db:PostgresDatabase,schema:string){
  })}finally{await db.releaseApplicationLease()}
 }
 export async function checkPostgres(db:PostgresDatabase){
- const result=await db.query<{schema:string;version:number;archives:boolean}>("SELECT current_schema() AS schema,(SELECT max(version)::integer FROM schema_migrations) AS version,to_regclass('karven_archive.backups') IS NOT NULL AS archives");
- if(result.rows[0]?.schema!=='karven'||result.rows[0]?.version!==9||!result.rows[0]?.archives)throw new DatabaseSetupError('База CRM не подготовлена. Выполните npm run db:migrate');
- return {schema:'karven',version:9};
+ const result=await db.query<{schema:string;version:number;archives:boolean}>("SELECT current_schema() AS schema,(SELECT max(version)::integer FROM schema_migrations) AS version,to_regclass('karven_archive.backups') IS NOT NULL AND to_regclass('karven_archive.event_log') IS NOT NULL AND to_regclass('karven_archive.report_documents') IS NOT NULL AS archives");
+ if(result.rows[0]?.schema!=='karven'||result.rows[0]?.version!==10||!result.rows[0]?.archives)throw new DatabaseSetupError('База CRM не подготовлена. Выполните npm run db:migrate');
+ return {schema:'karven',version:10};
 }
 
 export const archiveSchema=`CREATE SCHEMA IF NOT EXISTS karven_archive;
@@ -166,7 +166,7 @@ $karven_archive$;
  EXECUTE $karven_access$
 ${privateAccessSql}
 $karven_access$;
- RAISE NOTICE 'KARVEN: installation complete, schema version 9';
+ RAISE NOTICE 'KARVEN: installation complete, schema version 10';
 END
 $karven_install$;
 `}

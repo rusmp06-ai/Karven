@@ -34,3 +34,6 @@ export function Field({label,children}:{label:string;children:React.ReactNode}) 
     return element.props.type==='hidden'?element:cloneElement(element,{id});
   })}</div>;
 }
+
+/** Mount the editable snapshot on first opening; keep drafts after dismissal. */
+export function DraftDetails({summary,children}:{summary:string;children:React.ReactNode}){const [opened,setOpened]=useState(false);return <details onToggle={e=>{if(e.currentTarget.open)setOpened(true)}}><summary>{summary}</summary>{opened&&children}</details>;}

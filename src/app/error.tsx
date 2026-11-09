@@ -1,0 +1,2 @@
+'use client';
+export default function ApplicationError({error,reset}:{error:Error&{digest?:string};reset:()=>void}){return <main className="login-page"><section className="panel editor"><h1>Не удалось открыть данные</h1><p>Повторите запрос. Если ошибка сохраняется, передайте код владельцу или администратору.</p>{error.digest&&<p className="muted">Код: {error.digest}</p>}<button onClick={reset}>Повторить</button><p><a href="/">Вернуться на главную</a></p></section></main>;}

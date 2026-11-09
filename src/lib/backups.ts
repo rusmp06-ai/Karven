@@ -14,12 +14,13 @@ import {recordAudit,type Tx} from './audit';
 import {once} from './idempotency';
 import type {BackupInfo} from './backup-types';
 // Dependency order, used for a complete logical restore with FK checks enabled.
-export const backupTables=['schema_migrations','drivers','vehicles','users','clients','trips','bookings','mutation_receipts','payments','refunds','trip_expenses','driver_settlements','driver_payouts','passenger_attendance','audit_events','client_notes','work_tasks','park_settings','route_templates'] as const;
-const integrationTables=['telegram_settings','telegram_outbox'];
-const allTables=[...backupTables,'sessions','login_attempts',...integrationTables];
+const legacyBackupTables=['schema_migrations','drivers','vehicles','users','clients','trips','bookings','mutation_receipts','payments','refunds','trip_expenses','driver_settlements','driver_payouts','passenger_attendance','audit_events','client_notes','work_tasks','park_settings','route_templates'] as const;
+export const backupTables=['schema_migrations','drivers','vehicles','users','clients','trips','bookings','work_shifts','shift_balances','booking_cancellations','mutation_receipts','payments','refunds','trip_expenses','driver_settlements','driver_payouts','passenger_attendance','audit_events','client_notes','work_tasks','park_settings','route_templates','organization_settings','report_documents','cash_transfers','cash_adjustments'] as const;
+const integrationTables=['telegram_settings','telegram_outbox','telegram_events'];
+const allTables=[...backupTables,'sessions','login_attempts','auth_rate_windows',...integrationTables];
 const maximumBytes=64*1024*1024;
 const metadataInput=z.object({id:z.uuid(),createdBy:z.uuid(),createdAt:z.iso.datetime(),kind:z.enum(['manual','before_restore','imported']),status:z.enum(['creating','verified','failed']),verifiedAt:z.iso.datetime().nullable(),restoredAt:z.iso.datetime().optional(),sha256:z.string().regex(/^[a-f0-9]{64}$/),bytes:z.number().int().min(0).max(maximumBytes),counts:z.record(z.string(),z.number().int().min(0)),error:z.string().max(256).optional()});
-const payloadInput=z.object({format:z.literal('karven-backup'),formatVersion:z.literal(1),schemaVersion:z.union([z.literal(8),z.literal(9)]),createdAt:z.iso.datetime(),layout:z.record(z.string(),z.array(z.string())),tables:z.record(z.string(),z.string())}).strict();
+const payloadInput=z.object({format:z.literal('karven-backup'),formatVersion:z.literal(1),schemaVersion:z.union([z.literal(8),z.literal(9),z.literal(10)]),createdAt:z.iso.datetime(),layout:z.record(z.string(),z.array(z.string())),tables:z.record(z.string(),z.string())}).strict();
 type Snapshot=z.infer<typeof payloadInput>;
 const hash=(bytes:Uint8Array|string)=>createHash('sha256').update(bytes).digest('hex');
 export function backupDirectory(){return path.resolve(process.env.CRM_BACKUP_DIR||(process.env.DATABASE_DIR?`${process.env.DATABASE_DIR}-backups`:path.join(process.cwd(),'data','backups')))}
@@ -43,19 +44,28 @@ async function columns(db:Tx|Database){
 }
 async function capture(db:Tx|Database):Promise<Snapshot>{
  const versions=(await db.query<{version:number}>('SELECT version FROM schema_migrations ORDER BY version')).rows.map(r=>r.version);
- if(JSON.stringify(versions)!==JSON.stringify([1,2,3,4,5,6,7,8,9]))throw new BusinessError('Версия базы несовместима с резервным копированием');
+ if(JSON.stringify(versions)!==JSON.stringify([1,2,3,4,5,6,7,8,9,10]))throw new BusinessError('Версия базы несовместима с резервным копированием');
  const layout=await columns(db),tables:Record<string,string>={};
  // Keep PostgreSQL JSON as text, preserving bigint values without JS rounding.
  for(const table of backupTables)tables[table]=(await db.query<{data:string}>(`SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb)::text AS data FROM "${table}" t`)).rows[0].data;
- return {format:'karven-backup',formatVersion:1,schemaVersion:9,createdAt:new Date().toISOString(),layout,tables};
+ return {format:'karven-backup',formatVersion:1,schemaVersion:10,createdAt:new Date().toISOString(),layout,tables};
 }
 async function replace(db:Tx,snapshot:Snapshot){
- const layout=await columns(db);if(snapshot.schemaVersion===8)for(const table of integrationTables)delete layout[table];
- if(JSON.stringify(layout)!==JSON.stringify(snapshot.layout))throw new BusinessError('Структура копии несовместима с приложением');
- if(JSON.stringify(Object.keys(snapshot.tables).sort())!==JSON.stringify([...backupTables].sort()))throw new BusinessError('В копии отсутствуют необходимые таблицы');
+ const layout=await columns(db),legacy=snapshot.schemaVersion<10;
+ const expectedTables=legacy?[...legacyBackupTables]:[...backupTables];
+ if(JSON.stringify(Object.keys(snapshot.tables).sort())!==JSON.stringify(expectedTables.sort()))throw new BusinessError('В копии отсутствуют необходимые таблицы');
+ const comparable={...layout};
+ if(legacy){
+  for(const table of Object.keys(comparable))if(!Object.hasOwn(snapshot.layout,table))delete comparable[table];
+  const added:Record<string,string[]>={bookings:['version'],payments:['created_by','shift_id'],refunds:['shift_id','cancellation_booking_id'],trip_expenses:['shift_id','method','document_reference'],driver_payouts:['shift_id']};
+  for(const [table,names] of Object.entries(added))comparable[table]=comparable[table].filter(field=>!names.includes(field.split(':')[0]));
+ }
+ if(JSON.stringify(comparable)!==JSON.stringify(snapshot.layout))throw new BusinessError('Структура копии несовместима с приложением');
  await db.exec(`TRUNCATE ${allTables.map(t=>`"${t}"`).join(',')}`);
- for(const table of backupTables)await db.query(`INSERT INTO "${table}" SELECT * FROM jsonb_populate_recordset(NULL::"${table}",$1::jsonb)`,[snapshot.tables[table]]);
- if(snapshot.schemaVersion===8)await db.exec('INSERT INTO schema_migrations(version) VALUES(9)');
+ for(const table of backupTables){if(!snapshot.tables[table])continue;const fields=snapshot.layout[table].map(f=>f.split(':')[0]);if(fields.some(f=>!layout[table].some(c=>c.split(':')[0]===f)))throw new BusinessError('Неизвестная колонка копии');const columns=fields.map(f=>`"${f}"`).join(',');await db.query(`INSERT INTO "${table}" (${columns}) SELECT ${columns} FROM jsonb_populate_recordset(NULL::"${table}",$1::jsonb)`,[snapshot.tables[table]]);}
+ if(legacy){await db.exec("INSERT INTO schema_migrations(version) VALUES(9),(10) ON CONFLICT DO NOTHING; INSERT INTO organization_settings(id) VALUES(1)");
+  await db.exec(`INSERT INTO booking_cancellations(booking_id,initiator,reason,paid_at_cancel_minor,retained_minor,return_due_minor,legacy) SELECT id,'legacy','Историческая отмена из копии',0,0,0,true FROM bookings WHERE status='cancelled'`);
+ }
  await db.exec('INSERT INTO telegram_settings(id) VALUES(1)');
 }
 async function checks(db:Tx|Database){
@@ -67,7 +77,9 @@ async function checks(db:Tx|Database){
  if((await db.query<{invalid:boolean}>(`SELECT ${extra.join(' OR ')} AS invalid`)).rows[0].invalid)throw new BusinessError('Копия содержит неподдерживаемые даты или числовые значения');
  const invalid=(await db.query<{invalid:boolean}>(`SELECT
  NOT EXISTS(SELECT 1 FROM users WHERE role='owner' AND active) OR
- (SELECT count(*) FROM park_settings)<>1 OR
+ (SELECT count(*) FROM park_settings)<>1 OR (SELECT count(*) FROM organization_settings)<>1 OR
+ EXISTS(SELECT c.booking_id FROM booking_cancellations c WHERE c.return_due_minor<(SELECT COALESCE(SUM(amount_minor),0) FROM refunds WHERE cancellation_booking_id=c.booking_id)) OR
+ EXISTS(SELECT b.id FROM bookings b LEFT JOIN booking_cancellations c ON c.booking_id=b.id WHERE b.status='cancelled' AND (c.booking_id IS NULL OR (SELECT COALESCE(SUM(amount_minor),0) FROM payments WHERE booking_id=b.id)-(SELECT COALESCE(SUM(amount_minor),0) FROM refunds WHERE booking_id=b.id) <> c.retained_minor+c.return_due_minor-(SELECT COALESCE(SUM(amount_minor),0) FROM refunds WHERE cancellation_booking_id=b.id))) OR
  EXISTS(SELECT 1 FROM audit_events WHERE jsonb_typeof(details)<>'object') OR
  EXISTS(SELECT 1 FROM bookings b CROSS JOIN LATERAL jsonb_array_elements(b.passengers) p WHERE jsonb_typeof(p)<>'object' OR jsonb_typeof(p->'name') IS DISTINCT FROM 'string' OR jsonb_typeof(p->'phone') IS DISTINCT FROM 'string') OR
  EXISTS(SELECT t.id FROM trips t JOIN bookings b ON b.trip_id=t.id AND b.status='confirmed' GROUP BY t.id,t.capacity HAVING SUM(b.seats)>t.capacity) OR
@@ -86,8 +98,14 @@ async function verifySnapshot(snapshot:Snapshot){
   await db.transaction(tx=>replace(tx,snapshot));await db.close();db=undefined;
   db=new PGlite(path.join(directory,'postgres'));await checks(db);
   const actual=await capture(db);
-  const expected={...snapshot.tables},restored={...actual.tables};if(snapshot.schemaVersion===8){delete expected.schema_migrations;delete restored.schema_migrations;}
-  if(JSON.stringify(restored)!==JSON.stringify(expected))throw new BusinessError('Данные после пробного восстановления не совпадают с копией');
+  const expected={...snapshot.tables},restored={...actual.tables};
+  const normalize=(value:unknown):unknown=>Array.isArray(value)?value.map(normalize):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).sort(([a],[b])=>a<b?-1:a>b?1:0).map(([key,v])=>[key,normalize(v)])):value;
+  for(const table of Object.keys(expected)){
+   if(snapshot.schemaVersion<10&&table==='schema_migrations')continue;
+   const fields=snapshot.layout[table].map(f=>f.split(':')[0]);
+   const project=(text:string)=>JSON.parse(text).map((row:Record<string,unknown>)=>JSON.stringify(normalize(Object.fromEntries(fields.map(key=>[key,row[key]]))))).sort();
+   if(JSON.stringify(project(expected[table]))!==JSON.stringify(project(restored[table])))throw new BusinessError('Данные после пробного восстановления не совпадают с копией');
+  }
   const counts:Record<string,number>={};for(const table of backupTables)counts[table]=(await db.query<{n:number}>(`SELECT count(*)::integer AS n FROM "${table}"`)).rows[0].n;
   return counts;
  }finally{try{if(db)await db.close()}finally{await rm(directory,{recursive:true,force:true})}}

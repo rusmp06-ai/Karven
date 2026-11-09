@@ -10,6 +10,8 @@ import {requireRole,type Actor} from './access';
 import {once} from './idempotency';
 import {recordAudit} from './audit';
 import {withWorkspace} from './workspace-lock';
+import {financialPdf} from './report-pdf';
+import {createOwnerReports,loadFinancialDocument} from './owner-reports';
 import type {TelegramView,TelegramDelivery} from './telegram-types';
 export type TelegramResult={status:'sent'|'retry'|'failed'|'unknown';error?:string;retryAfter?:number};
 export type TelegramTransport=(token:string,chatId:string,text:string)=>Promise<TelegramResult>;
@@ -32,7 +34,7 @@ const proxyState=globalThis as typeof globalThis&{karvenTelegramProxyReady?:bool
 export const sendTelegram:TelegramTransport=async(token,chatId,text)=>{
  if(!proxyState.karvenTelegramProxyReady){if((process.env.HTTPS_PROXY||process.env.HTTP_PROXY)&&typeof http.setGlobalProxyFromEnv==='function')http.setGlobalProxyFromEnv();proxyState.karvenTelegramProxyReady=true;}
  try{
-  const response=await fetch(`https://api.telegram.org/bot${token}/sendMessage`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:chatId,text,link_preview_options:{is_disabled:true}}),signal:AbortSignal.timeout(8000),redirect:'error',cache:'no-store'});
+  const response=await fetch(`https://api.telegram.org/bot${token}/sendMessage`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:chatId,text,link_preview_options:{is_disabled:true}}),signal:AbortSignal.timeout(4000),redirect:'error',cache:'no-store'});
   const data=await response.json() as {ok?:boolean;error_code?:number;parameters?:{retry_after?:number}};
   if(response.ok&&data.ok===true)return {status:'sent'};
   const code=data.error_code??response.status;
@@ -49,7 +51,8 @@ export function createTelegram(db:Database,actor:Actor,transport:TelegramTranspo
  return {
   async view():Promise<TelegramView>{
    access();const [s,result]=await Promise.all([settings(db),db.query<TelegramDelivery>('SELECT booking_id,status,attempts,last_error,created_at,sent_at FROM telegram_outbox ORDER BY created_at DESC,booking_id LIMIT 30')]);
-   const deliveries=result.rows.map(d=>({...d,created_at:new Date(d.created_at).toISOString(),sent_at:d.sent_at?new Date(d.sent_at).toISOString():null}));return {enabled:s.enabled,tokenConfigured:!!s.encrypted_token,chatId:s.chat_id,version:s.version,lastTestAt:s.last_test_at?new Date(s.last_test_at).toISOString():null,lastTestError:s.last_test_error,deliveries};},
+   const events=(await db.query<Record<string,unknown>>('SELECT id,kind,entity_id,status,attempts,last_error,created_at,sent_at FROM telegram_events ORDER BY created_at DESC,id LIMIT 50')).rows.map(e=>({...e,created_at:new Date(String(e.created_at)).toISOString(),sent_at:e.sent_at?new Date(String(e.sent_at)).toISOString():null}));
+   const deliveries=result.rows.map(d=>({...d,created_at:new Date(d.created_at).toISOString(),sent_at:d.sent_at?new Date(d.sent_at).toISOString():null}));return {enabled:s.enabled,tokenConfigured:!!s.encrypted_token,chatId:s.chat_id,version:s.version,lastTestAt:s.last_test_at?new Date(s.last_test_at).toISOString():null,lastTestError:s.last_test_error,deliveries,events};},
   async save(raw:unknown){
    access();const input=z.object({token:z.string().trim().max(150).default('').refine(v=>!v||tokenPattern.test(v),'Проверьте формат токена BotFather'),chatId:z.string().trim().max(21).default('').refine(v=>!v||chatPattern.test(v),'Укажите числовой ID чата, для группы — со знаком минус'),enabled:z.enum(['true','false']),version:z.coerce.number().int().min(1),requestId:z.uuid()}).parse(raw);
    await db.transaction(tx=>once(tx,actor,input.requestId,'telegram.save',input,async()=>{
@@ -57,16 +60,16 @@ export function createTelegram(db:Database,actor:Actor,transport:TelegramTranspo
     const encrypted=input.token?await encrypt(input.token):current.encrypted_token;
     if(input.enabled==='true'&&(!encrypted||!input.chatId))throw new BusinessError('Для уведомлений укажите токен бота и ID чата');
     await tx.query('UPDATE telegram_settings SET encrypted_token=$1,chat_id=$2,enabled=$3,version=version+1,last_test_at=NULL,last_test_error=NULL WHERE id=1',[encrypted,input.chatId,input.enabled==='true']);
-    await tx.exec("UPDATE telegram_outbox SET status='cancelled',last_error='Настройки подключения изменены' WHERE status IN ('pending','failed','unknown','sending')");
+    await tx.exec("UPDATE telegram_outbox SET status='cancelled',last_error='Настройки подключения изменены' WHERE status IN ('pending','failed','unknown','sending'); UPDATE telegram_events SET status='cancelled',last_error='Подключение изменено' WHERE status IN ('pending','failed','unknown','sending')");
     await recordAudit(tx,actor,singleton,'telegram.configured',{enabled:input.enabled==='true',tokenChanged:!!input.token});
    }));
   },
-  async disconnect(raw:unknown){access();const input=z.object({version:z.coerce.number().int(),requestId:z.uuid()}).parse(raw);await db.transaction(tx=>once(tx,actor,input.requestId,'telegram.disconnect',input,async()=>{const s=(await tx.query<{version:number}>('SELECT version FROM telegram_settings WHERE id=1 FOR UPDATE')).rows[0];if(s.version!==input.version)throw new BusinessError('Настройки уже изменены. Обновите страницу');await tx.exec("UPDATE telegram_settings SET enabled=false,encrypted_token=NULL,chat_id='',version=version+1,last_test_at=NULL,last_test_error=NULL WHERE id=1; UPDATE telegram_outbox SET status='cancelled',last_error='Подключение удалено' WHERE status IN ('pending','failed','unknown','sending')");await recordAudit(tx,actor,singleton,'telegram.disconnected');}));},
+  async disconnect(raw:unknown){access();const input=z.object({version:z.coerce.number().int(),requestId:z.uuid()}).parse(raw);await db.transaction(tx=>once(tx,actor,input.requestId,'telegram.disconnect',input,async()=>{const s=(await tx.query<{version:number}>('SELECT version FROM telegram_settings WHERE id=1 FOR UPDATE')).rows[0];if(s.version!==input.version)throw new BusinessError('Настройки уже изменены. Обновите страницу');await tx.exec("UPDATE telegram_settings SET enabled=false,encrypted_token=NULL,chat_id='',version=version+1,last_test_at=NULL,last_test_error=NULL WHERE id=1; UPDATE telegram_outbox SET status='cancelled',last_error='Подключение удалено' WHERE status IN ('pending','failed','unknown','sending'); UPDATE telegram_events SET status='cancelled',last_error='Подключение изменено' WHERE status IN ('pending','failed','unknown','sending')");await recordAudit(tx,actor,singleton,'telegram.disconnected');}));},
   async test(){access();const s=await settings(db);if(!s.encrypted_token||!s.chat_id)throw new BusinessError('Сначала сохраните токен и ID чата');const token=await decrypt(s.encrypted_token);let result:TelegramResult;try{result=await transport(token,s.chat_id,'Karven CRM: тестовое уведомление. Подключение Telegram работает.')}catch{result={status:'unknown',error:'Нет подтверждения доставки тестового сообщения'}}await db.query('UPDATE telegram_settings SET last_test_at=now(),last_test_error=$1 WHERE id=1',[result.status==='sent'?null:result.error??'Тестовое сообщение не доставлено']);await db.transaction(tx=>recordAudit(tx,actor,singleton,'telegram.tested',{success:result.status==='sent'}));if(result.status!=='sent')throw new BusinessError(result.error??'Тестовое сообщение не доставлено');},
   async retry(raw:unknown){access();const input=z.object({bookingId:z.uuid(),confirmed:z.literal('yes'),requestId:z.uuid()}).parse(raw);await db.transaction(tx=>once(tx,actor,input.requestId,'telegram.retry',input,async()=>{const s=(await tx.query<Settings>('SELECT * FROM telegram_settings WHERE id=1')).rows[0];if(!s.enabled||!s.encrypted_token)throw new BusinessError('Сначала включите подключение Telegram');const row=(await tx.query<{status:string;settings_version:number}>('SELECT status,settings_version FROM telegram_outbox WHERE booking_id=$1 FOR UPDATE',[input.bookingId])).rows[0];if(!row||!['failed','unknown','cancelled'].includes(row.status))throw new BusinessError('Это уведомление недоступно для повтора');await tx.query("UPDATE telegram_outbox SET status='pending',attempts=0,last_error=NULL,next_attempt_at=now(),settings_version=$2 WHERE booking_id=$1",[input.bookingId,s.version]);await recordAudit(tx,actor,input.bookingId,'telegram.retried');}));},
  };
 }
-export async function deliverNextTelegram(db:Database,transport:TelegramTransport=sendTelegram){return withWorkspace(()=>performDelivery(db,transport))}
+export async function deliverNextTelegram(db:Database,transport:TelegramTransport=sendTelegram,documentTransport:TelegramDocumentTransport=sendTelegramDocument){return withWorkspace(async()=>await performDelivery(db,transport)||await performEventDelivery(db,transport,documentTransport))}
 async function performDelivery(db:Database,transport:TelegramTransport){
  const job=await withWorkspace(()=>db.transaction(async tx=>{
   await tx.exec("UPDATE telegram_outbox SET status='unknown',last_error='Обработка прервана без подтверждения. Проверьте чат перед повтором' WHERE status='sending' AND next_attempt_at<now()");
@@ -102,3 +105,32 @@ export function startTelegramWorker(db:Database){
 export async function dispatchTelegram(db:Database,maximum=1){
  for(let i=0;i<maximum;i++){try{if(!await deliverNextTelegram(db))break}catch{break}}
 }
+
+export type TelegramDocumentTransport=(token:string,chatId:string,bytes:Uint8Array,filename:string,caption:string)=>Promise<TelegramResult>;
+export const sendTelegramDocument:TelegramDocumentTransport=async(token,chatId,bytes,filename,caption)=>{
+ if(!proxyState.karvenTelegramProxyReady){if((process.env.HTTPS_PROXY||process.env.HTTP_PROXY)&&typeof http.setGlobalProxyFromEnv==='function')http.setGlobalProxyFromEnv();proxyState.karvenTelegramProxyReady=true;}
+ try{const form=new FormData();form.set('chat_id',chatId);form.set('caption',caption);form.set('document',new Blob([Uint8Array.from(bytes).buffer],{type:'application/pdf'}),filename);const response=await fetch(`https://api.telegram.org/bot${token}/sendDocument`,{method:'POST',body:form,signal:AbortSignal.timeout(4000),redirect:'error',cache:'no-store'});const result=await response.json() as {ok?:boolean;error_code?:number;parameters?:{retry_after?:number}};if(response.ok&&result.ok===true)return {status:'sent'};if(result.error_code===429)return {status:'retry',retryAfter:Math.max(5,Math.min(86400,Number(result.parameters?.retry_after)||30)),error:'Telegram ограничил частоту отправки'};return {status:response.status>=500?'unknown':'failed',error:response.status>=500?'Доставка документа не подтверждена. Проверьте чат':'Telegram отклонил документ. Проверьте настройки бота'};}catch{return {status:'unknown',error:'Нет подтверждения доставки документа. Проверьте чат перед повтором'}}
+};
+async function performEventDelivery(db:Database,transport:TelegramTransport,documentTransport:TelegramDocumentTransport){
+ const job=await db.transaction(async tx=>{
+  await tx.exec("UPDATE telegram_events SET status='unknown',last_error='Доставка прервана без подтверждения; проверьте чат' WHERE status='sending' AND next_attempt_at<now()");const s=(await tx.query<Settings>('SELECT * FROM telegram_settings WHERE id=1')).rows[0];if(!s.enabled||!s.encrypted_token)return null;
+  await tx.query("UPDATE telegram_events SET status='cancelled',last_error='Подключение изменено' WHERE status='pending' AND settings_version<>$1",[s.version]);
+  const event=(await tx.query<{id:string;kind:string;entity_id:string;payload:Record<string,unknown>;attempts:number}>("SELECT id,kind,entity_id,payload,attempts FROM telegram_events WHERE status='pending' AND settings_version=$1 AND next_attempt_at<=now() ORDER BY created_at,id LIMIT 1 FOR UPDATE",[s.version])).rows[0];if(!event)return null;await tx.query("UPDATE telegram_events SET status='sending',attempts=attempts+1,next_attempt_at=now()+interval '5 minutes' WHERE id=$1",[event.id]);return {...event,settings:s};
+ });if(!job)return false;
+ let result:TelegramResult;
+ try{const token=await decrypt(job.settings.encrypted_token!),p=job.payload,money=(v:unknown)=>`${(Number(v??0)/100).toFixed(2)} ${p.currency??''}`;
+  if(job.kind==='report.document'){
+   const saved=await loadFinancialDocument(db,job.entity_id);if(saved.sha256!==p.sha256)throw new BusinessError('Контрольная сумма отчёта не совпала');const bytes=await financialPdf(saved.document,saved.sha256);result=await documentTransport(token,job.settings.chat_id,bytes,`karven-report-${job.entity_id}.pdf`,`KARVEN · ${saved.document.from} — ${saved.document.to}\nВерсия ${saved.document.revision}\nSHA-256: ${saved.sha256}`);
+  }else{
+   const title=job.kind==='booking.cancelled'?'Отмена брони':job.kind==='booking.refunded'?'Фактический возврат клиенту':'Отмена рейса';
+   const lines=[title,`Событие: ${job.id}`,`Заказ / рейс: ${job.entity_id}`,p.name?`Клиент: ${p.name}`:'',p.phone?`Телефон: +${p.phone}`:'',p.route?`Маршрут: ${p.route}`:'',p.departureAt?`Отправление: ${new Date(String(p.departureAt)).toLocaleString('ru',{timeZone:'Asia/Bishkek'})} (Бишкек)`:'',p.manager?`Менеджер: ${p.manager}`:'',p.initiator?`Инициатор: ${p.initiator==='park'?'Парк':'Клиент'}`:'',p.reason?`Причина: ${p.reason}`:''];
+   if(job.kind==='booking.cancelled')lines.push(`Получено: ${money(p.paidMinor)}`,`Удержано: ${money(p.retainedMinor)}`,`К возврату: ${money(p.returnDueMinor)}`,Number(p.returnDueMinor)>0?'Статус: ожидает фактического возврата':'Возврат не требуется');
+   if(job.kind==='booking.refunded')lines.push(`Фактически возвращено: ${money(p.amountMinor)}`,p.remainingMinor!==undefined?`Осталось вернуть: ${money(p.remainingMinor)}`:'Частичный возврат по действующему заказу',`Способ: ${p.method??'—'}`,`Основание: ${p.reference??p.reason??'—'}`);
+   if(job.kind==='trip.cancelled')lines.push(`Отменено броней: ${p.bookingCount}`,`Обязательства по возвратам: ${money(p.returnDueMinor)}`,'Деньги ещё не считаются возвращёнными');
+   const base=process.env.CRM_PUBLIC_URL||process.env.URL;try{if(base){const url=new URL(base);if(url.protocol==='https:'){url.search='';url.hash='';url.searchParams.set('owner','cancellations');url.searchParams.set('booking',job.entity_id);lines.push(url.toString());}}}catch{/* optional URL never changes event facts */}
+   result=await transport(token,job.settings.chat_id,lines.filter(Boolean).join('\n').slice(0,4000));
+  }
+ }catch(error){result={status:'failed',error:error instanceof BusinessError?error.message:'Не удалось подготовить или отправить уведомление'};}
+ await db.transaction(async tx=>{const status=result.status==='retry'?(job.attempts+1<3?'pending':'failed'):result.status;await tx.query("UPDATE telegram_events SET status=$2,last_error=$3,sent_at=CASE WHEN $2='sent' THEN now() ELSE NULL END,next_attempt_at=now()+($4::integer*interval '1 second') WHERE id=$1 AND status='sending' AND settings_version=$5",[job.id,status,result.error??null,Math.ceil(result.retryAfter??30),job.settings.version]);});return true;
+}
+export async function retryEvent(db:Database,actor:Actor,raw:unknown){requireRole(actor,'owner');const input=z.object({eventId:z.uuid(),confirmed:z.literal('yes'),requestId:z.uuid()}).parse(raw);await db.transaction(tx=>once(tx,actor,input.requestId,'telegram.event_retry',input,async()=>{const s=(await tx.query<Settings>('SELECT * FROM telegram_settings WHERE id=1')).rows[0];if(!s.enabled||!s.encrypted_token)throw new BusinessError('Сначала включите Telegram');const event=(await tx.query<{status:string;settings_version:number}>('SELECT status,settings_version FROM telegram_events WHERE id=$1 FOR UPDATE',[input.eventId])).rows[0];if(!event||!['unknown','failed'].includes(event.status)||event.settings_version!==s.version)throw new BusinessError('Событие недоступно для повтора в текущем подключении');await tx.query("UPDATE telegram_events SET status='pending',attempts=0,last_error=NULL,next_attempt_at=now() WHERE id=$1",[input.eventId]);await recordAudit(tx,actor,input.eventId,'telegram.event_retried');}));}

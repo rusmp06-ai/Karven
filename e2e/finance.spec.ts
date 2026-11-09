@@ -1,5 +1,5 @@
 import { test, expect, type Page, type Locator } from '@playwright/test';
-import {openActions,openTrip,closeModal} from './helpers';
+import {login,openActions,openTrip,closeModal} from './helpers';
 async function save(form:Locator) {
  await form.getByRole('button',{name:'Сохранить',exact:true}).click();
  await expect(form.locator('button[type=submit]')).toBeEnabled();await expect(form.getByText('Сохранено',{exact:true})).toHaveText('Сохранено');
@@ -10,11 +10,11 @@ async function financeTrip(page:Page) {
 }
 function metric(page:Page,label:string) {return page.locator('.finance-metrics article').filter({has:page.locator('span',{hasText:label})}).locator('strong');}
 test('возврат, расходы, завершение и полная выплата водителю',async({page})=>{
- await page.goto('/login');await page.getByLabel('Логин',{exact:true}).fill('e2e-owner');await page.getByLabel('Пароль',{exact:true}).fill('e2e-owner-password-1234');await page.getByRole('button',{name:'Войти',exact:true}).click();
+ await login(page);
  await page.getByRole('button',{name:'Бронирования'}).click();
  const booking=page.locator('article.booking').filter({has:page.getByRole('heading',{name:'Финансовый пассажир',exact:true})});
  await openActions(booking,'Действия с бронью');await booking.getByText('Частичный возврат',{exact:true}).click();const refund=booking.locator('form').filter({has:page.locator('input[name=action][value=refund]')});
- await refund.getByLabel('Сумма возврата').fill('200');await refund.getByLabel('Причина возврата').fill('Согласованная скидка');await save(refund);
+ await refund.getByLabel('Сумма возврата').fill('200');await refund.getByLabel('Причина возврата').fill('Согласованная скидка');await refund.getByRole('checkbox').check();await save(refund);
  await expect(booking.locator('.amounts').getByText(/800/)).toHaveCount(2);
  await booking.getByText('Посадка и неявка',{exact:false}).click();await booking.getByRole('button',{name:'Посадка',exact:true}).click();await expect(booking.locator('.attendance-status.boarded')).toBeVisible();
  await financeTrip(page);

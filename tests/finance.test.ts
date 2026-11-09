@@ -1,3 +1,5 @@
+import {createCancellations} from '../src/lib/cancellations';
+import {createCashShifts} from '../src/lib/cash-shifts';
 import { beforeEach, afterEach, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { PGlite } from '@electric-sql/pglite';
@@ -39,8 +41,9 @@ it('частичный возврат уменьшает стоимость и �
  expect((await crm.dashboard()).bookings[0].paid_minor).toBe(90000);
 });
 it('отмена с полным возвратом атомарна, сохраняет историю и освобождает места',async()=>{
- await crm.addPayment(payment());const input={bookingId,reason:'Клиент отменил поездку',method:'transfer',requestId:key()};
- await Promise.all([finance.cancelWithRefund(input),finance.cancelWithRefund(input)]);
+ await crm.addPayment(payment());const input={bookingId,initiator:'client',reason:'Клиент отменил поездку',requestId:key()};
+ await Promise.all([createCancellations(db,owner).cancel(input),createCancellations(db,owner).cancel(input)]);
+ await createCancellations(db,owner).returnMoney({bookingId,amount:'1000',method:'transfer',reference:'Банковский перевод клиенту',confirmed:'yes',requestId:key()});
  const data=await crm.dashboard();expect(data.trips[0].occupied).toBe(0);expect(data.bookings[0]).toMatchObject({status:'cancelled',paid_minor:0,total_minor:0,refunded_minor:100000});
  expect((await db.query('SELECT * FROM payments')).rows).toHaveLength(1);expect((await db.query('SELECT * FROM refunds')).rows).toHaveLength(1);
  expect((await finance.report()).trips[0]).toMatchObject({revenue_minor:0,received_minor:100000,refunded_minor:100000,cash_minor:0});
@@ -67,7 +70,7 @@ it('завершает рейс однократно, сохраняет дол�
  const data=await crm.dashboard();expect(data.trips[0].status).toBe('completed');expect(data.bookings[0].total_minor-data.bookings[0].paid_minor).toBe(100000);
  await expect(crm.createBooking({tripId,name:'Другой',phone:'+996555333444',seats:1,total:'100'})).rejects.toThrow('закрыто');
  await expect(crm.cancelBooking(bookingId)).rejects.toThrow('завершённого');
- await expect(finance.cancelWithRefund({bookingId,reason:'Отмена после рейса',method:'cash',requestId:key()})).rejects.toThrow('завершённого');
+ await expect(createCancellations(db,owner).cancel({bookingId,initiator:'client',reason:'Отмена после рейса',requestId:key()})).rejects.toThrow('Завершённую');
  await crm.addPayment(payment());expect((await crm.dashboard()).bookings[0].paid_minor).toBe(100000);
 });
 it('для завершения требуется назначение ресурсов',async()=>{
@@ -110,12 +113,15 @@ it('водитель видит только собственный расчёт
  await finance.addExpense(expense('100','driver'));await finance.addExpense(expense('50','park'));
  const report=await createFinance(db,driver).report();expect(report.trips).toHaveLength(1);expect(report.expenses).toHaveLength(1);expect(report.trips[0].revenue_minor).toBeNull();expect(report.trips[0].cash_minor).toBeNull();expect(report.refunds).toEqual([]);
  const outsider:Actor={...driver,driver_id:randomUUID()};expect((await createFinance(db,outsider).report()).trips).toHaveLength(0);
- for(const operation of ['completeTrip','refund','cancelWithRefund','addExpense','voidExpense','approveSettlement','payDriver'] as const)await expect(createFinance(db,driver)[operation]({})).rejects.toThrow('прав');
+ for(const operation of ['completeTrip','refund','addExpense','voidExpense','approveSettlement','payDriver'] as const)await expect(createFinance(db,driver)[operation]({})).rejects.toThrow('прав');
 });
-it('диспетчер может учитывать расходы, но не возвраты, утверждения и выплаты',async()=>{
+it('менеджер проводит расходы, возвраты и расчёты водителя в своей смене',async()=>{
  const dispatcher:Actor={...owner,role:'dispatcher'};const f=createFinance(db,dispatcher);
- await f.addExpense(expense());expect((await f.report()).expenses).toHaveLength(1);
- for(const operation of ['refund','cancelWithRefund','voidExpense','approveSettlement','payDriver'] as const)await expect(f[operation]({})).rejects.toThrow('прав');
+ await createCashShifts(db,dispatcher).open({requestId:key()});
+ await f.addExpense({...expense(),method:'cash'});expect((await f.report()).expenses).toHaveLength(1);
+ await crm.addPayment(payment('600'));await f.refund(refund('100'));
+ await complete();await f.approveSettlement(approve());await f.payDriver({tripId,amount:'300',method:'transfer',requestId:key()});
+ expect((await f.report()).trips[0]).toMatchObject({paid_driver_minor:30000,refunded_minor:10000});
 });
 it('после возврата на завершённом рейсе результат уменьшается, расчёт водителя сохраняется',async()=>{
  await crm.addPayment(payment());await complete();await finance.approveSettlement(approve());await finance.refund(refund('100'));

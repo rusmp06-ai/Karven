@@ -1,0 +1,17 @@
+import {beforeEach,afterEach,it,expect} from 'vitest';
+import {randomUUID} from 'node:crypto';
+import {PGlite} from '@electric-sql/pglite';
+import {PDFDocument} from 'pdf-lib';
+import {schema} from '../src/lib/schema';
+import {createCrm} from '../src/lib/crm';
+import {createOwnerReports} from '../src/lib/owner-reports';
+import {financialPdf} from '../src/lib/report-pdf';
+import {owner,seedOwner} from './helpers';
+import {reportDay} from '../src/lib/reporting';
+let db:PGlite,id:string,tripId:string;
+beforeEach(async()=>{db=new PGlite();await db.exec(schema);await seedOwner(db);const crm=createCrm(db,owner);tripId=await crm.createTrip({origin:'Бишкек',destination:'Нарын',departureAt:new Date(Date.now()+86400000).toISOString(),capacity:4,currency:'KGS'});id=await crm.createBooking({tripId,name:'Клиент PDF',phone:'+996555001122',seats:1,total:'1000',initialPayment:'400'});},30000);
+afterEach(async()=>{await db.close()});
+const period=()=>({from:reportDay(new Date().toISOString()),to:reportDay(new Date().toISOString()),requestId:randomUUID()});
+it('снимок сохраняет суммы, не меняется от новых платежей и возвращается при повторе',async()=>{const reports=createOwnerReports(db,owner),input=period(),reportId=await reports.create(input);expect(await reports.create(input)).toBe(reportId);const first=await reports.read(reportId);expect(first.document.summary).toMatchObject([{currency:'KGS',received:40000,net:40000}]);await createCrm(db,owner).addPayment({bookingId:id,amount:'100',method:'cash',requestId:randomUUID()});expect((await reports.read(reportId)).sha256).toBe(first.sha256);const next=await reports.create({...period(),previousId:reportId});expect((await reports.read(next)).document).toMatchObject({revision:2,previousId:reportId,summary:[{received:50000}]});});
+it('формирует PDF с кириллицей и идентификатором, обнаруживает подмену снимка',async()=>{const reports=createOwnerReports(db,owner),reportId=await reports.create(period()),saved=await reports.read(reportId),bytes=await financialPdf(saved.document,saved.sha256);expect(Buffer.from(bytes).subarray(0,5).toString()).toBe('%PDF-');const pdf=await PDFDocument.load(bytes);expect(pdf.getTitle()).toContain(reportId);expect(pdf.getPageCount()).toBeGreaterThan(0);await db.query("UPDATE report_documents SET payload=jsonb_set(payload,'{from}','\"2000-01-01\"') WHERE id=$1",[reportId]);await expect(reports.read(reportId)).rejects.toThrow('контрольная');},30000);
+it('запрещает менеджеру документы владельца, неверные периоды и отправку без настройки',async()=>{const reports=createOwnerReports(db,owner);await expect(createOwnerReports(db,{...owner,role:'dispatcher'}).create(period())).rejects.toThrow('прав');await expect(reports.create({...period(),to:'2000-01-01'})).rejects.toThrow('период');const reportId=await reports.create(period());await expect(reports.send({reportId,confirmed:'yes',requestId:randomUUID()})).rejects.toThrow('Telegram');expect((await db.query('SELECT * FROM telegram_events')).rows).toHaveLength(0);});

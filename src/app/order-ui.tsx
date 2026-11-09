@@ -11,6 +11,7 @@ export type BookingView=Omit<Booking,'departure_at'>&{departure_at:string};
 export type TripView=Omit<Trip,'departure_at'|'ends_at'|'completed_at'|'cancelled_at'>&{departure_at:string;ends_at:string;completed_at:string|null;cancelled_at:string|null};
 export const sourceLabels:Record<string,string>={phone:'Телефон',whatsapp:'WhatsApp',telegram:'Telegram',website:'Сайт',aggregator:'Агрегатор',other:'Другое'};
 export function OrderEditor({trips=[],selectedTripId,onSelectTrip,booking,onSaved,contact,tariffs=[]}:{trips?:TripView[];selectedTripId?:string;onSelectTrip?:(id:string)=>void;booking?:BookingView;onSaved?:(state:ActionState)=>void;contact?:{name:string;phone:string};tariffs?:RouteTemplate[]}) {
+ const [version,setVersion]=useState(booking?.version??1);
  const trip=trips.find(t=>t.id===selectedTripId)??trips[0];
  const [name,setName]=useState(booking?.name??contact?.name??'');
  const [phone,setPhone]=useState(booking?.phone?`+${booking.phone}`:contact?`+${contact.phone}`:'');
@@ -26,10 +27,10 @@ export function OrderEditor({trips=[],selectedTripId,onSelectTrip,booking,onSave
  const updatePassenger=(index:number,field:'name'|'phone',value:string)=>setPassengers(current=>{
   const copy=Array.from({length:count},(_,i)=>current[i]??{name:'',phone:''});copy[index]={...copy[index],[field]:value};return copy;
  });
- function reset(state:ActionState) {onSaved?.(state);if(!booking){setName('');setPhone('');setKind('seats');setCount(1);setSame(true);setPassengers([]);setPrice('');setInitialPayment('0');}}
+ function reset(state:ActionState) {if(booking)setVersion(v=>v+1);onSaved?.(state);if(!booking){setName('');setPhone('');setKind('seats');setCount(1);setSame(true);setPassengers([]);setPrice('');setInitialPayment('0');}}
  if(!booking&&!trip)return <p className="muted">Нет будущих рейсов для бронирования.</p>;
  return <SubmitForm action={booking?'bookingDetails':'booking'} onSuccess={reset} className="order-form" submitLabel={booking?'Сохранить изменения':'Создать бронь'} disabled={!booking&&(free===0||(kind==='vehicle'&&trip!.occupied>0))}>
- {booking?<input name="bookingId" type="hidden" value={booking.id}/>:<>
+ {booking?<><input name="bookingId" type="hidden" value={booking.id}/><input name="version" type="hidden" value={version}/></>:<>
  <h3 className="form-section"><Icon name="pin"/>Рейс и места</h3>
  <div className="form-wide trip-picker"><Field label="Рейс"><select name="tripId" value={trip!.id} onChange={e=>{setPrice('');setInitialPayment('0');onSelectTrip?.(e.target.value);}}>{trips.map(t=><option value={t.id} key={t.id}>{t.origin} → {t.destination} · {new Date(t.departure_at).toLocaleString('ru',{timeZone:'Asia/Bishkek'})} · {t.currency} · {t.capacity-t.occupied} мест</option>)}</select></Field><div className="trip-picker-preview" aria-hidden="true"><strong>{trip!.origin} → {trip!.destination}</strong><small>{new Date(trip!.departure_at).toLocaleString('ru',{timeZone:'Asia/Bishkek',day:'numeric',month:'long',year:'numeric',hour:'2-digit',minute:'2-digit'})} · Свободно {free} мест</small><Icon name="chevron" size={17}/></div></div>
  <Field label="Тип заказа"><select name="bookingType" value={kind} onChange={e=>setKind(e.target.value as 'seats'|'vehicle')}><option value="seats">Отдельные места</option><option value="vehicle">Вся машина</option></select></Field>
