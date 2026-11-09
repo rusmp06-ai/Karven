@@ -75,9 +75,9 @@ export function createCrm(db: Database, actor:Actor) {
     },
     async updateBookingDetails(raw:unknown) {
       requireRole(actor,'owner','dispatcher');
-      const input=detailsInput.extend({bookingId:uuid,note:z.string().trim().max(1000).default('')}).parse(raw);
-      await db.transaction(async tx=>{
-        const booking=(await tx.query<{trip_id:string;status:string;passenger_count:number}>('SELECT trip_id,status,passenger_count FROM bookings WHERE id=$1 FOR UPDATE',[input.bookingId])).rows[0];
+      const input=detailsInput.extend({bookingId:uuid,note:z.string().trim().max(1000).default(''),requestId:uuid.default(()=>randomUUID())}).parse(raw);
+      await db.transaction(tx=>once(tx,actor,input.requestId,'booking.details',input,async()=>{
+        const booking=(await tx.query<z.infer<typeof detailsInput>&{trip_id:string;status:string;passenger_count:number;note:string}>('SELECT trip_id,status,passenger_count,contact_name AS name,contact_phone AS phone,pickup_address AS "pickupAddress",dropoff_address AS "dropoffAddress",luggage,child_seats AS "childSeats",source,passengers,note FROM bookings WHERE id=$1 FOR UPDATE',[input.bookingId])).rows[0];
         if(!booking||booking.status!=='confirmed')throw new BusinessError('Активная бронь не найдена');
         const trip=(await tx.query<{status:string}>('SELECT status FROM trips WHERE id=$1 FOR UPDATE',[booking.trip_id])).rows[0];
         if(trip.status!=='scheduled')throw new BusinessError('Карточка завершённого рейса закрыта для изменения');
@@ -85,8 +85,9 @@ export function createCrm(db: Database, actor:Actor) {
         if(!input.passengers||input.passengers.length!==booking.passenger_count)throw new BusinessError('Укажите данные каждого пассажира');
         if(input.childSeats>booking.passenger_count)throw new BusinessError('Детских кресел не может быть больше пассажиров');
         await tx.query('UPDATE bookings SET contact_name=$2,contact_phone=$3,pickup_address=$4,dropoff_address=$5,luggage=$6,child_seats=$7,source=$8,passengers=$9,note=$10 WHERE id=$1',[input.bookingId,input.name,input.phone,input.pickupAddress,input.dropoffAddress,input.luggage,input.childSeats,input.source,JSON.stringify(input.passengers),input.note]);
-        await audit(tx,input.bookingId,'booking.details_updated',{});
-      });
+        const fields=['name','phone','pickupAddress','dropoffAddress','luggage','childSeats','source','passengers','note'] as const;
+        await audit(tx,input.bookingId,'booking.details_updated',{before:Object.fromEntries(fields.map(key=>[key,booking[key]])),after:Object.fromEntries(fields.map(key=>[key,input[key]]))});
+      }));
     },
     async addPayment(raw: unknown) {
       requireRole(actor,'owner','dispatcher');

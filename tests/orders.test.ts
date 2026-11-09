@@ -91,3 +91,9 @@ it('повтор создания рейса возвращает тот же р
  await db.query("UPDATE trips SET departure_at=now()-interval '1 hour' WHERE id=$1",[id]);expect(await crm.createTrip(raw)).toBe(id);
  await expect(crm.createTrip({...raw,capacity:5})).rejects.toThrow();
 });
+it('редактирование сохраняет до/после и не дублируется при повторной отправке',async()=>{
+ const id=await crm.createBooking(input());const update={...input(),bookingId:id,name:'Новый заказчик',pickupAddress:'Новый адрес аудита',requestId:randomUUID()};await crm.updateBookingDetails(update);await crm.updateBookingDetails(update);
+ const events=(await db.query<{details:{before:{name:string;pickupAddress:string};after:{name:string;pickupAddress:string}}}>("SELECT details FROM audit_events WHERE entity_id=$1 AND action='booking.details_updated'",[id])).rows;
+ expect(events).toHaveLength(1);expect(events[0].details.before).toMatchObject({name:'Заказчик',pickupAddress:'Бишкек, Чуй 10'});expect(events[0].details.after).toMatchObject({name:'Новый заказчик',pickupAddress:'Новый адрес аудита'});
+ await expect(crm.updateBookingDetails({...update,name:'Другая отправка с тем же ключом'})).rejects.toThrow('идентификатор');expect((await crm.dashboard()).bookings[0].name).toBe('Новый заказчик');
+});

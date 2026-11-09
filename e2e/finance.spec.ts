@@ -34,5 +34,6 @@ test('возврат, расходы, завершение и полная вы�
  await payout().getByLabel('Сумма выплаты').fill('250');await payout().getByRole('button',{name:'Сохранить',exact:true}).click();await expect(page.getByText('Расчёт выплачен полностью.',{exact:true})).toBeVisible();
  await expect(metric(page,'Результат по начислениям')).toContainText('350');await expect(metric(page,'Денежный итог парка')).toContainText('350');
  await expect(page.getByText('Добавить расход',{exact:true})).toHaveCount(0);
+ await page.getByLabel('Поиск финансовых операций').fill('Ош → Баткен');await expect(page.locator('.ledger-totals')).toContainText('Изменение денег 350 KGS');
  await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBe(true);
 });
